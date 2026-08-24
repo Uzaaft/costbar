@@ -1,0 +1,195 @@
+const std = @import("std");
+const model = @import("../model.zig");
+
+pub fn LocalAI(
+    comptime provider_id: []const u8,
+    comptime provider_name: []const u8,
+) type {
+    return struct {
+        const Self = @This();
+
+        const OwnedSnapshot = struct {
+            arena: std.heap.ArenaAllocator,
+            period: model.Period,
+            input_tokens: u64,
+            output_tokens: u64,
+            cache_read_tokens: u64,
+            cache_creation_tokens: u64,
+            reasoning_tokens: u64,
+            source: []const u8,
+            updated_at_unix: i64,
+            allowances: []const RawAllowance,
+            models: []const []const u8,
+
+            fn deinit(self: *OwnedSnapshot) void {
+                self.arena.deinit();
+            }
+        };
+
+        const RawAllowance = struct {
+            id: []const u8,
+            label: []const u8,
+            used_percent: f64,
+            resets_at_unix: ?i64 = null,
+            detail: ?[]const u8 = null,
+        };
+
+        const RawTokens = struct {
+            input_tokens: u64 = 0,
+            output_tokens: u64 = 0,
+            cache_read_tokens: u64 = 0,
+            cache_creation_tokens: u64 = 0,
+            reasoning_tokens: u64 = 0,
+        };
+
+        const RawSnapshot = struct {
+            period: model.Period,
+            token_usage: RawTokens = .{},
+            allowance_windows: []const RawAllowance = &.{},
+            models: []const []const u8 = &.{},
+            source: []const u8,
+            updated_at_unix: ?i64 = null,
+        };
+
+        snapshot: ?OwnedSnapshot = null,
+
+        pub fn init() Self {
+            return .{};
+        }
+
+        pub fn deinit(self: *Self) void {
+            if (self.snapshot) |*snapshot| snapshot.deinit();
+            self.snapshot = null;
+        }
+
+        pub fn metadata(_: *const Self) model.ProviderMetadata {
+            return .{
+                .id = provider_id,
+                .display_name = provider_name,
+                .kind = .ai,
+            };
+        }
+
+        pub fn ingest(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            document_id: []const u8,
+            payload: []const u8,
+            received_at_unix: i64,
+        ) !void {
+            if (!std.mem.eql(u8, document_id, "usage")) {
+                return error.UnsupportedDocument;
+            }
+            var replacement = try parseSnapshot(allocator, payload, received_at_unix);
+            errdefer replacement.deinit();
+            if (self.snapshot) |*existing| existing.deinit();
+            self.snapshot = replacement;
+        }
+
+        pub fn collect(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            _: model.Period,
+        ) !model.ProviderReport {
+            const snapshot = self.snapshot orelse return error.NotFetched;
+            const resources = try allocator.alloc(model.Resource, snapshot.models.len);
+            errdefer allocator.free(resources);
+            for (snapshot.models, 0..) |name, index| {
+                resources[index] = .{
+                    .id = name,
+                    .name = name,
+                    .kind = "model",
+                    .status = .active,
+                };
+            }
+            const line_items = try allocator.alloc(model.CostLineItem, 0);
+            errdefer allocator.free(line_items);
+
+            const allowances: []model.AllowanceWindow = if (snapshot.allowances.len == 0)
+                &.{}
+            else
+                try allocator.alloc(model.AllowanceWindow, snapshot.allowances.len);
+            errdefer if (allowances.len > 0) allocator.free(allowances);
+            for (snapshot.allowances, 0..) |allowance, index| {
+                allowances[index] = .{
+                    .id = allowance.id,
+                    .label = allowance.label,
+                    .used_percent = allowance.used_percent,
+                    .resets_at_unix = allowance.resets_at_unix,
+                    .detail = allowance.detail,
+                };
+            }
+
+            return .{
+                .summary = .{
+                    .id = provider_id,
+                    .display_name = provider_name,
+                    .kind = .ai,
+                    .currency = "USD",
+                    .current_cost_micros = 0,
+                    .contributes_to_totals = false,
+                    .updated_at_unix = snapshot.updated_at_unix,
+                },
+                .resources = resources,
+                .line_items = line_items,
+                .allowance_windows = allowances,
+                .token_usage = .{
+                    .period = snapshot.period,
+                    .input_tokens = snapshot.input_tokens,
+                    .output_tokens = snapshot.output_tokens,
+                    .cache_read_tokens = snapshot.cache_read_tokens,
+                    .cache_creation_tokens = snapshot.cache_creation_tokens,
+                    .reasoning_tokens = snapshot.reasoning_tokens,
+                    .source = snapshot.source,
+                    .updated_at_unix = snapshot.updated_at_unix,
+                },
+            };
+        }
+
+        fn parseSnapshot(
+            allocator: std.mem.Allocator,
+            payload: []const u8,
+            received_at_unix: i64,
+        ) !OwnedSnapshot {
+            var result = OwnedSnapshot{
+                .arena = .init(allocator),
+                .period = undefined,
+                .input_tokens = 0,
+                .output_tokens = 0,
+                .cache_read_tokens = 0,
+                .cache_creation_tokens = 0,
+                .reasoning_tokens = 0,
+                .source = "",
+                .updated_at_unix = received_at_unix,
+                .allowances = &.{},
+                .models = &.{},
+            };
+            errdefer result.deinit();
+            const raw = try std.json.parseFromSliceLeaky(
+                RawSnapshot,
+                result.arena.allocator(),
+                payload,
+                .{ .allocate = .alloc_always, .ignore_unknown_fields = true },
+            );
+            try raw.period.validate();
+            for (raw.allowance_windows) |allowance| {
+                if (!std.math.isFinite(allowance.used_percent) or
+                    allowance.used_percent < 0 or allowance.used_percent > 100)
+                {
+                    return error.InvalidAllowance;
+                }
+            }
+            result.period = raw.period;
+            result.input_tokens = raw.token_usage.input_tokens;
+            result.output_tokens = raw.token_usage.output_tokens;
+            result.cache_read_tokens = raw.token_usage.cache_read_tokens;
+            result.cache_creation_tokens = raw.token_usage.cache_creation_tokens;
+            result.reasoning_tokens = raw.token_usage.reasoning_tokens;
+            result.source = raw.source;
+            result.updated_at_unix = raw.updated_at_unix orelse received_at_unix;
+            result.allowances = raw.allowance_windows;
+            result.models = raw.models;
+            return result;
+        }
+    };
+}

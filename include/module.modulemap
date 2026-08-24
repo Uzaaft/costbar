@@ -1,0 +1,6 @@
+// This makes the Costbar Zig core available to the Xcode build.
+// We append "Kit" because Xcode target and Clang module names must be unique.
+module CostbarKit {
+    umbrella header "costbar.h"
+    export *
+}
