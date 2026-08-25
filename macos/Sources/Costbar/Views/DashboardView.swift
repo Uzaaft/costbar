@@ -283,9 +283,7 @@ private struct ProviderRow: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 7) {
       HStack(alignment: .center, spacing: 11) {
-        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-          .fill(accentColor)
-          .frame(width: 9, height: 9)
+        ProviderLogo(providerID: summary.id)
 
         VStack(alignment: .leading, spacing: 1) {
           Text(summary.displayName)
@@ -301,14 +299,19 @@ private struct ProviderRow: View {
         Spacer(minLength: 10)
 
         VStack(alignment: .trailing, spacing: 1) {
-          if summary.status == .available {
+          switch summary.status {
+          case .available:
             Text(providerAmount)
               .font(.system(size: 13, weight: .medium, design: .monospaced))
               .foregroundStyle(Palette.textPrimary)
             Text(summary.contributesToTotals ? percentageText : "local usage")
               .font(.system(size: 11, design: .monospaced))
               .foregroundStyle(Palette.textTertiary)
-          } else {
+          case .notConfigured:
+            Image(systemName: "gearshape")
+              .font(.system(size: 12))
+              .foregroundStyle(Palette.textTertiary)
+          case .unavailable:
             Image(systemName: "exclamationmark.triangle.fill")
               .font(.system(size: 12))
               .foregroundStyle(.orange)
@@ -361,21 +364,7 @@ private struct ProviderRow: View {
   }
 
   private var accentColor: Color {
-    switch summary.id {
-    case "digitalocean": Color(red: 0.13, green: 0.42, blue: 1.0)
-    case "cloudflare": Color(red: 0.95, green: 0.50, blue: 0.13)
-    case "runpod": Color(red: 0.42, green: 0.82, blue: 0.58)
-    case "vercel": Color(red: 0.88, green: 0.88, blue: 0.88)
-    case "openrouter": Color(red: 0.40, green: 0.40, blue: 0.95)
-    case "subscriptions": Color(red: 0.74, green: 0.45, blue: 0.94)
-    case "codex": Color(red: 0.30, green: 0.78, blue: 0.68)
-    case "claude": Color(red: 0.86, green: 0.48, blue: 0.30)
-    case "openai-api": Color(red: 0.22, green: 0.72, blue: 0.62)
-    case "anthropic-api": Color(red: 0.78, green: 0.43, blue: 0.26)
-    case "github": Color(red: 0.65, green: 0.65, blue: 0.72)
-    case "cursor": Color(red: 0.55, green: 0.70, blue: 0.98)
-    default: .indigo
-    }
+    ProviderTint.color(for: summary.id)
   }
 
   private var percentageText: String {
@@ -401,8 +390,13 @@ private struct ProviderRow: View {
   }
 
   private var subtitle: String {
-    if summary.status == .unavailable {
+    switch summary.status {
+    case .notConfigured:
+      return "Not configured"
+    case .unavailable:
       return summary.errorMessage ?? "Unavailable"
+    case .available:
+      break
     }
     // What the provider actually bills for, when it says: "2 Droplets · 1 App".
     let products = report.resources.filter { $0.kind == "product" }
@@ -461,6 +455,7 @@ private struct BreakdownList: View {
   private func providerBreakdown(_ report: Dashboard.ProviderReport) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 8) {
+        ProviderLogo(providerID: report.id, size: 14)
         Text(report.summary.displayName)
           .font(.system(size: 11, weight: .semibold))
           .tracking(0.8)

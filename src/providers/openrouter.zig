@@ -239,6 +239,11 @@ fn parseSnapshot(
         result.activity_present = true;
         for (data_value.array.items) |item_value| {
             const item = try requireObject(item_value);
+            if (optionalString(item.get("date"))) |date| {
+                const timestamp = parseActivityDate(date) catch continue;
+                if (timestamp < result.activity_period.start_unix or
+                    timestamp >= result.activity_period.end_exclusive_unix) continue;
+            }
             const name = optionalString(item.get("model")) orelse "Unknown model";
             const provider_name = optionalString(item.get("provider_name")) orelse "OpenRouter";
             const amount = try optionalMoney(item.get("usage")) orelse 0;
@@ -270,6 +275,24 @@ fn parseSnapshot(
     result.models = try models.toOwnedSlice(arena);
     std.mem.sort(ModelUsage, result.models, {}, byAmountDescending);
     return result;
+}
+
+fn parseActivityDate(value: []const u8) !i64 {
+    if (value.len != 10 or value[4] != '-' or value[7] != '-') {
+        return error.InvalidDate;
+    }
+    const year = try std.fmt.parseInt(i64, value[0..4], 10);
+    const month = try std.fmt.parseInt(i64, value[5..7], 10);
+    const day = try std.fmt.parseInt(i64, value[8..10], 10);
+    if (month < 1 or month > 12 or day < 1 or day > 31) return error.InvalidDate;
+    const adjusted_year = year - @intFromBool(month <= 2);
+    const era = @divFloor(adjusted_year, 400);
+    const year_of_era = adjusted_year - era * 400;
+    const shifted_month = month + (if (month > 2) @as(i64, -3) else 9);
+    const day_of_year = @divFloor(153 * shifted_month + 2, 5) + day - 1;
+    const day_of_era = year_of_era * 365 + @divFloor(year_of_era, 4) -
+        @divFloor(year_of_era, 100) + day_of_year;
+    return (era * 146_097 + day_of_era - 719_468) * 86_400;
 }
 
 fn byAmountDescending(_: void, left: ModelUsage, right: ModelUsage) bool {
@@ -353,4 +376,26 @@ test "OpenRouter reports monthly spend, credits, limits, and model tokens" {
     try std.testing.expectEqual(@as(u64, 35), report.token_usage.?.output_tokens);
     try std.testing.expectEqual(@as(usize, 2), report.line_items.len);
     try std.testing.expectEqual(@as(i64, 10_250_000), report.line_items[1].amount_micros);
+}
+
+test "OpenRouter filters management activity to the requested period" {
+    var provider = OpenRouter.init();
+    defer provider.deinit();
+    try provider.ingest(std.testing.allocator, "snapshot",
+        \\{
+        \\  "key":{"data":{"usage_monthly":2}},
+        \\  "activity_period":{"start_unix":1785535200,"end_exclusive_unix":1788213600},
+        \\  "activity":{"data":[
+        \\    {"date":"2026-08-10","model":"inside","usage":1},
+        \\    {"date":"2026-07-10","model":"outside","usage":1}
+        \\  ]}
+        \\}
+    , 100);
+    const report = try provider.collect(std.testing.allocator, .{
+        .start_unix = 1785535200,
+        .end_exclusive_unix = 1788213600,
+    });
+    defer report.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), report.resources.len);
+    try std.testing.expectEqualStrings("inside", report.resources[0].name);
 }

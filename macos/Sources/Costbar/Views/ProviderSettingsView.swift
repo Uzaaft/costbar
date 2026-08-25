@@ -13,6 +13,30 @@ struct ProviderSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("OVHcloud Public Cloud") {
+                Picker("API region", selection: $settings.ovhEndpoint) {
+                    Text("Europe").tag("ovh-eu")
+                    Text("Canada").tag("ovh-ca")
+                    Text("United States").tag("ovh-us")
+                }
+                TextField("Public Cloud project ID", text: $settings.ovhProjectID)
+                    .textContentType(.none)
+                TextField("Application key", text: $settings.ovhApplicationKey)
+                    .textContentType(.none)
+                SecureField("Application secret", text: $settings.ovhApplicationSecret)
+                SecureField("Consumer key", text: $settings.ovhConsumerKey)
+                Text("The API credential needs GET access to the project's current usage and forecast endpoints.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Hetzner Cloud") {
+                SecureField("Project API token", text: $settings.hetznerToken)
+                Text("Shows a gross, VAT-inclusive estimate from current servers, backups, volumes, load balancers, IPs, and snapshots. Deleted resources are not visible to the Cloud API.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Cloudflare") {
                 TextField("Account ID", text: $settings.cloudflareAccountID)
                     .textContentType(.none)
@@ -58,13 +82,30 @@ struct ProviderSettingsView: View {
                 Text("Organization Admin key; reads Cost and Messages usage reports.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                TextField("xAI team ID", text: $settings.xAITeamID)
+                    .textContentType(.none)
+                SecureField("xAI Management API key", text: $settings.xAIManagementKey)
+                Text("Reads Grok API spend and prepaid credit. SuperGrok consumer quota is a separate service without a public API.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Developer tools") {
                 TextField("GitHub organization", text: $settings.githubOrganization)
                     .textContentType(.none)
-                SecureField("GitHub token", text: $settings.githubToken)
-                Text("Requires organization Administration read and enhanced billing access.")
+                Picker("GitHub authentication", selection: $settings.usesGitHubCLI) {
+                    Text("Saved token").tag(false)
+                    Text("GitHub CLI").tag(true)
+                }
+                .pickerStyle(.segmented)
+                if settings.usesGitHubCLI {
+                    Text("Zig invokes the signed-in gh CLI directly. Its token is never exported to Costbar.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    SecureField("GitHub token", text: $settings.githubToken)
+                }
+                Text("The selected identity requires organization Administration read and enhanced billing access.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 SecureField("Cursor Team Admin API key", text: $settings.cursorAdminKey)
@@ -73,39 +114,7 @@ struct ProviderSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Recurring subscriptions") {
-                ForEach($settings.subscriptions) { $subscription in
-                    VStack(alignment: .leading, spacing: 7) {
-                        HStack {
-                            TextField("Subscription name", text: $subscription.name)
-                            Button {
-                                settings.removeSubscription(id: subscription.id)
-                            } label: {
-                                Image(systemName: "trash")
-                            }
-                            .buttonStyle(.borderless)
-                            .help("Remove subscription")
-                        }
-                        HStack {
-                            TextField("Amount", text: $subscription.amount)
-                                .frame(width: 100)
-                            TextField("Currency", text: $subscription.currency)
-                                .frame(width: 70)
-                            Picker("Cadence", selection: $subscription.cadence) {
-                                ForEach(RecurringSubscription.Cadence.allCases, id: \.self) {
-                                    Text($0.title).tag($0)
-                                }
-                            }
-                            .labelsHidden()
-                        }
-                    }
-                }
-                Button("Add subscription", systemImage: "plus") {
-                    settings.addSubscription()
-                }
-            }
-
-            Section("AI subscriptions") {
+            Section("AI subscriptions and agents") {
                 Toggle("Track Codex subscription usage", isOn: $settings.tracksCodexUsage)
                 Text("Reads Codex quota through the signed-in local CLI and counts tokens from local session logs. Prompt and response text is never retained.")
                     .font(.caption)
@@ -126,6 +135,11 @@ struct ProviderSettingsView: View {
                         }
                     }
                 }
+
+                Toggle("Track OpenCode usage", isOn: $settings.tracksOpenCodeUsage)
+                Text("Queries exact cost and token metadata from the installed OpenCode CLI. Prompts and responses are never read.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             HStack {

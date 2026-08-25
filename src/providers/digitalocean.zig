@@ -763,7 +763,7 @@ test "DigitalOcean fetches billing and every Droplet page through comptime clien
             const step = self.steps[self.next];
             self.next += 1;
             try std.testing.expectEqualStrings(step.url, request.url);
-            try std.testing.expectEqualStrings("digitalocean-token", request.bearer_token);
+            try std.testing.expectEqualStrings("digitalocean-token", request.bearer_token.?);
             return .{
                 .status = 200,
                 .body = try allocator.dupe(u8, step.body),

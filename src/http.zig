@@ -5,7 +5,15 @@ const std = @import("std");
 /// data and strip it when a redirect changes origin.
 pub const Request = struct {
     url: []const u8,
-    bearer_token: []const u8,
+    bearer_token: ?[]const u8 = null,
+    /// Complete Authorization value for schemes other than Bearer.
+    authorization: ?[]const u8 = null,
+    method: std.http.Method = .GET,
+    payload: ?[]const u8 = null,
+    content_type: ?[]const u8 = null,
+    extra_headers: []const std.http.Header = &.{},
+    /// Authentication-adjacent headers that must never cross an origin.
+    privileged_headers: []const std.http.Header = &.{},
     max_response_bytes: usize = 4 * 1024 * 1024,
 };
 
@@ -72,25 +80,40 @@ pub const StdBackend = struct {
         allocator: std.mem.Allocator,
         request: Request,
     ) !Response {
-        const authorization = try std.fmt.allocPrint(
-            allocator,
-            "Bearer {s}",
-            .{request.bearer_token},
-        );
-        defer allocator.free(authorization);
+        const allocated_authorization = if (request.authorization == null and request.bearer_token != null)
+            try std.fmt.allocPrint(
+                allocator,
+                "Bearer {s}",
+                .{request.bearer_token.?},
+            )
+        else
+            null;
+        defer if (allocated_authorization) |value| allocator.free(value);
+        const authorization = request.authorization orelse allocated_authorization;
 
         var body_writer: std.Io.Writer.Allocating = .init(allocator);
         defer body_writer.deinit();
 
         const result = try self.client.fetch(.{
             .location = .{ .url = request.url },
+            .method = request.method,
+            .payload = request.payload,
             .response_writer = &body_writer.writer,
             // Provider URLs are fixed. Treat redirects as responses instead
             // of forwarding a bearer token to a server-selected location.
             .redirect_behavior = .unhandled,
             .headers = .{
-                .authorization = .{ .override = authorization },
+                .authorization = if (authorization) |value|
+                    .{ .override = value }
+                else
+                    .omit,
+                .content_type = if (request.content_type) |value|
+                    .{ .override = value }
+                else
+                    .default,
             },
+            .extra_headers = request.extra_headers,
+            .privileged_headers = request.privileged_headers,
         });
         if (body_writer.writer.end > request.max_response_bytes) {
             return error.ResponseTooLarge;

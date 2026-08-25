@@ -70,6 +70,8 @@ struct SpendCompositionCard: View {
       grouped = Dictionary(grouping: entries, by: \.service)
     case .provider:
       grouped = Dictionary(grouping: entries, by: \.providerName)
+    case .resource:
+      grouped = Dictionary(grouping: entries, by: \.resource)
     }
 
     return grouped.map { label, groupedEntries in
@@ -214,6 +216,10 @@ struct BreakdownDataTable: View {
       selectedProviderID == nil || entry.providerID == selectedProviderID
     }
 
+    if selectedProviderID != nil {
+      return entries.map(SpendTableRowModel.init(entry:)).sortedByAmount()
+    }
+
     switch section {
     case .overview:
       return entries.map(SpendTableRowModel.init(entry:)).sortedByAmount()
@@ -331,9 +337,7 @@ private struct SpendTableRow: View {
   var body: some View {
     HStack(spacing: 18) {
       HStack(spacing: 10) {
-        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-          .fill(ProviderTint.color(for: row.providerID))
-          .frame(width: 8, height: 8)
+        ProviderLogo(providerID: row.providerID, size: 16)
         Text(row.service)
           .foregroundStyle(WindowPalette.textPrimary)
           .lineLimit(1)
@@ -416,9 +420,7 @@ private struct ResourceInventoryTable: View {
         ForEach(rows.prefix(18)) { row in
           HStack(spacing: 18) {
             HStack(spacing: 10) {
-              RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-                .fill(ProviderTint.color(for: row.providerID))
-                .frame(width: 8, height: 8)
+              ProviderLogo(providerID: row.providerID, size: 16)
               Text(row.name)
                 .foregroundStyle(WindowPalette.textPrimary)
                 .lineLimit(1)

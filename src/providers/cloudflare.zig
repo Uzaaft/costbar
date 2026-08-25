@@ -119,22 +119,12 @@ pub const Cloudflare = struct {
         };
         errdefer replacement_subscriptions.deinit();
 
-        const zones_url = try std.fmt.allocPrint(
+        var replacement_zones: ?Document = fetchAllZones(
             allocator,
-            api_prefix ++ "zones?account.id={s}&per_page=50",
-            .{credentials.account_id},
-        );
-        defer allocator.free(zones_url);
-
-        var replacement_zones: ?Document = zones: {
-            const response = client.get(allocator, .{
-                .url = zones_url,
-                .bearer_token = credentials.token,
-            }) catch break :zones null;
-            defer response.deinit(allocator);
-            response.requireSuccess() catch break :zones null;
-            break :zones parseZones(allocator, response.body, received_at_unix) catch null;
-        };
+            client,
+            credentials,
+            received_at_unix,
+        ) catch null;
         errdefer if (replacement_zones) |*document| document.deinit();
 
         replace(&self.subscriptions, replacement_subscriptions);
@@ -275,6 +265,69 @@ pub const Cloudflare = struct {
         return newest;
     }
 };
+
+fn fetchAllZones(
+    allocator: std.mem.Allocator,
+    client: anytype,
+    credentials: Credentials,
+    received_at_unix: i64,
+) !Document {
+    const ResultInfo = struct {
+        page: usize = 1,
+        total_pages: usize = 1,
+    };
+    const PageMeta = struct { result_info: ?ResultInfo = null };
+    var result = Document{
+        .arena = .init(allocator),
+        .services = &.{},
+        .currency = null,
+        .updated_at_unix = received_at_unix,
+    };
+    errdefer result.deinit();
+    const arena = result.arena.allocator();
+    var services: std.ArrayList(Service) = .empty;
+    var page_number: usize = 1;
+    while (page_number <= 20) : (page_number += 1) {
+        const zones_url = try std.fmt.allocPrint(
+            allocator,
+            api_prefix ++ "zones?account.id={s}&per_page=50&page={d}",
+            .{ credentials.account_id, page_number },
+        );
+        defer allocator.free(zones_url);
+        const response = try client.get(allocator, .{
+            .url = zones_url,
+            .bearer_token = credentials.token,
+        });
+        defer response.deinit(allocator);
+        try response.requireSuccess();
+
+        var document = try parseZones(allocator, response.body, received_at_unix);
+        defer document.deinit();
+        if (result.currency == null and document.currency != null) {
+            result.currency = try arena.dupe(u8, document.currency.?);
+        }
+        for (document.services) |service| {
+            try services.append(arena, .{
+                .id = try arena.dupe(u8, service.id),
+                .name = try arena.dupe(u8, service.name),
+                .usage_label = try arena.dupe(u8, service.usage_label),
+                .amount_micros = service.amount_micros,
+                .enabled = service.enabled,
+                .scope = service.scope,
+                .zone_id = if (service.zone_id) |id| try arena.dupe(u8, id) else null,
+            });
+        }
+
+        var metadata = try std.json.parseFromSlice(PageMeta, allocator, response.body, .{
+            .ignore_unknown_fields = true,
+        });
+        defer metadata.deinit();
+        const total_pages = if (metadata.value.result_info) |info| info.total_pages else 1;
+        if (page_number >= total_pages) break;
+    }
+    result.services = try services.toOwnedSlice(arena);
+    return result;
+}
 
 fn isAlreadyBilled(plan: Service, subscriptions: []const Service) bool {
     const zone_id = plan.zone_id orelse return false;
@@ -671,7 +724,7 @@ test "Cloudflare fetches subscriptions and zone plans through comptime client" {
             const step = self.steps[self.next];
             self.next += 1;
             try std.testing.expectEqualStrings(step.url, request.url);
-            try std.testing.expectEqualStrings("cloudflare-token", request.bearer_token);
+            try std.testing.expectEqualStrings("cloudflare-token", request.bearer_token.?);
             return .{
                 .status = 200,
                 .body = try allocator.dupe(u8, step.body),
@@ -688,7 +741,7 @@ test "Cloudflare fetches subscriptions and zone plans through comptime client" {
             ,
         },
         .{
-            .url = api_prefix ++ "zones?account.id=" ++ account_id ++ "&per_page=50",
+            .url = api_prefix ++ "zones?account.id=" ++ account_id ++ "&per_page=50&page=1",
             .body =
             \\{"success":true,"result":[{"id":"zone-a","name":"example.com","status":"active","plan":{"name":"Pro Website","price":20,"currency":"USD","frequency":"monthly","is_subscribed":true}}]}
             ,
@@ -761,6 +814,52 @@ test "Cloudflare still reports subscriptions when the zone feed is forbidden" {
 
     try std.testing.expectEqual(@as(usize, 2), backend.calls);
     try std.testing.expectEqual(@as(i64, 5_000_000), report.summary.current_cost_micros);
+}
+
+test "Cloudflare follows every zone result page" {
+    const Backend = struct {
+        calls: usize = 0,
+
+        pub fn get(
+            self: *@This(),
+            allocator: std.mem.Allocator,
+            request: http.Request,
+        ) !http.Response {
+            const body = switch (self.calls) {
+                0 => "{\"success\":true,\"result\":[]}",
+                1 => "{\"success\":true,\"result\":[{\"id\":\"zone-a\",\"name\":\"a.test\",\"status\":\"active\",\"plan\":{\"name\":\"Pro\",\"price\":20,\"currency\":\"USD\",\"frequency\":\"monthly\",\"is_subscribed\":true}}],\"result_info\":{\"page\":1,\"total_pages\":2}}",
+                2 => "{\"success\":true,\"result\":[{\"id\":\"zone-b\",\"name\":\"b.test\",\"status\":\"active\",\"plan\":{\"name\":\"Business\",\"price\":25,\"currency\":\"USD\",\"frequency\":\"monthly\",\"is_subscribed\":true}}],\"result_info\":{\"page\":2,\"total_pages\":2}}",
+                else => return error.UnexpectedRequest,
+            };
+            if (self.calls > 0) {
+                const suffix = if (self.calls == 1) "&page=1" else "&page=2";
+                try std.testing.expect(std.mem.endsWith(u8, request.url, suffix));
+            }
+            self.calls += 1;
+            return .{ .status = 200, .body = try allocator.dupe(u8, body) };
+        }
+    };
+    var backend = Backend{};
+    var client = http.Client(Backend).init(&backend);
+    var provider = Cloudflare.init();
+    defer provider.deinit();
+    try provider.fetch(
+        std.testing.allocator,
+        &client,
+        .{
+            .token = "token",
+            .account_id = "0123456789abcdef0123456789abcdef",
+        },
+        100,
+    );
+    const report = try provider.collect(std.testing.allocator, .{
+        .start_unix = 1,
+        .end_exclusive_unix = 200,
+    });
+    defer report.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), backend.calls);
+    try std.testing.expectEqual(@as(usize, 2), report.resources.len);
+    try std.testing.expectEqual(@as(i64, 45_000_000), report.summary.current_cost_micros);
 }
 
 test "Cloudflare validates account IDs before making a request" {

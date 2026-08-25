@@ -3,8 +3,13 @@ const model = @import("model.zig");
 const Provider = @import("provider.zig").Provider;
 
 pub const Registry = struct {
+    const Entry = struct {
+        provider: Provider,
+        configured: bool,
+    };
+
     allocator: std.mem.Allocator,
-    providers: std.ArrayList(Provider) = .empty,
+    providers: std.ArrayList(Entry) = .empty,
 
     pub fn init(allocator: std.mem.Allocator) Registry {
         return .{ .allocator = allocator };
@@ -15,7 +20,26 @@ pub const Registry = struct {
     }
 
     pub fn add(self: *Registry, provider: Provider) !void {
-        try self.providers.append(self.allocator, provider);
+        try self.addConfigured(provider, true);
+    }
+
+    /// Core-owned integrations start disabled and are enabled only when their
+    /// complete credential set or local tracking toggle is present.
+    pub fn addConfigured(self: *Registry, provider: Provider, configured: bool) !void {
+        try self.providers.append(self.allocator, .{
+            .provider = provider,
+            .configured = configured,
+        });
+    }
+
+    pub fn setConfigured(self: *Registry, provider_id: []const u8, configured: bool) !void {
+        for (self.providers.items) |*entry| {
+            if (std.mem.eql(u8, entry.provider.metadata().id, provider_id)) {
+                entry.configured = configured;
+                return;
+            }
+        }
+        return error.UnknownProvider;
     }
 
     pub fn ingest(
@@ -25,14 +49,16 @@ pub const Registry = struct {
         payload: []const u8,
         received_at_unix: i64,
     ) !void {
-        for (self.providers.items) |provider| {
-            if (std.mem.eql(u8, provider.metadata().id, provider_id)) {
-                return provider.ingest(
+        for (self.providers.items) |*entry| {
+            if (std.mem.eql(u8, entry.provider.metadata().id, provider_id)) {
+                try entry.provider.ingest(
                     self.allocator,
                     document_id,
                     payload,
                     received_at_unix,
                 );
+                entry.configured = true;
+                return;
             }
         }
         return error.UnknownProvider;
@@ -55,14 +81,24 @@ pub const Registry = struct {
         var totals: std.ArrayList(model.CurrencyTotal) = .empty;
         errdefer totals.deinit(allocator);
 
-        for (self.providers.items) |provider| {
-            const report = provider.collect(allocator, period) catch |err|
-                try unavailableReport(
+        for (self.providers.items) |entry| {
+            const report = if (!entry.configured)
+                try statusReport(
                     allocator,
-                    provider.metadata(),
-                    @errorName(err),
+                    entry.provider.metadata(),
+                    .not_configured,
+                    null,
                     generated_at_unix,
-                );
+                )
+            else
+                entry.provider.collect(allocator, period) catch |err|
+                    try statusReport(
+                        allocator,
+                        entry.provider.metadata(),
+                        .unavailable,
+                        @errorName(err),
+                        generated_at_unix,
+                    );
             errdefer report.deinit(allocator);
 
             if (report.summary.status == .available and report.summary.contributes_to_totals) {
@@ -135,10 +171,11 @@ fn addFinancialToTotals(
     });
 }
 
-fn unavailableReport(
+fn statusReport(
     allocator: std.mem.Allocator,
     metadata: model.ProviderMetadata,
-    error_message: []const u8,
+    status: model.ProviderStatus,
+    error_message: ?[]const u8,
     generated_at_unix: i64,
 ) !model.ProviderReport {
     const resources = try allocator.alloc(model.Resource, 0);
@@ -150,7 +187,7 @@ fn unavailableReport(
             .id = metadata.id,
             .display_name = metadata.display_name,
             .kind = metadata.kind,
-            .status = .unavailable,
+            .status = status,
             .error_message = error_message,
             .currency = "",
             .current_cost_micros = 0,
@@ -240,4 +277,47 @@ test "one failing provider does not hide healthy providers" {
 
     try std.testing.expectEqual(model.ProviderStatus.unavailable, dashboard.providers[0].summary.status);
     try std.testing.expectEqualStrings("AuthenticationFailed", dashboard.providers[0].summary.error_message.?);
+}
+
+test "unconfigured providers are distinct from configured failures" {
+    const NeverCollected = struct {
+        calls: usize = 0,
+
+        pub fn metadata(_: *const @This()) model.ProviderMetadata {
+            return .{ .id = "optional", .display_name = "Optional", .kind = .cloud };
+        }
+
+        pub fn collect(
+            self: *@This(),
+            _: std.mem.Allocator,
+            _: model.Period,
+        ) !model.ProviderReport {
+            self.calls += 1;
+            return error.NotFetched;
+        }
+    };
+
+    var provider = NeverCollected{};
+    var registry = Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    try registry.addConfigured(Provider.from(&provider), false);
+
+    var dashboard = try registry.collect(std.testing.allocator, .{
+        .start_unix = 1,
+        .end_exclusive_unix = 2,
+    }, 2);
+    try std.testing.expectEqual(model.ProviderStatus.not_configured, dashboard.providers[0].summary.status);
+    try std.testing.expectEqual(@as(?[]const u8, null), dashboard.providers[0].summary.error_message);
+    try std.testing.expectEqual(@as(usize, 0), provider.calls);
+    dashboard.deinit(std.testing.allocator);
+
+    try registry.setConfigured("optional", true);
+    dashboard = try registry.collect(std.testing.allocator, .{
+        .start_unix = 1,
+        .end_exclusive_unix = 2,
+    }, 2);
+    defer dashboard.deinit(std.testing.allocator);
+    try std.testing.expectEqual(model.ProviderStatus.unavailable, dashboard.providers[0].summary.status);
+    try std.testing.expectEqualStrings("NotFetched", dashboard.providers[0].summary.error_message.?);
+    try std.testing.expectEqual(@as(usize, 1), provider.calls);
 }

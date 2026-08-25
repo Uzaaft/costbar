@@ -10,6 +10,7 @@ test "Codex reports local tokens and subscription allowance without adding cost"
         \\{
         \\  "period":{"start_unix":1,"end_exclusive_unix":200},
         \\  "token_usage":{"input_tokens":100,"output_tokens":20,"reasoning_tokens":5},
+        \\  "token_usage_windows":[{"id":"hour","label":"Last hour","period":{"start_unix":100,"end_exclusive_unix":200},"token_usage":{"input_tokens":40,"output_tokens":10}}],
         \\  "allowance_windows":[{"id":"primary","label":"5 hour","used_percent":40,"resets_at_unix":150}],
         \\  "models":["gpt-codex"],
         \\  "source":"local Codex sessions"
@@ -23,5 +24,7 @@ test "Codex reports local tokens and subscription allowance without adding cost"
     defer report.deinit(std.testing.allocator);
     try std.testing.expect(!report.summary.contributes_to_totals);
     try std.testing.expectEqual(@as(u64, 125), report.token_usage.?.total());
+    try std.testing.expectEqual(@as(usize, 1), report.token_usage_windows.len);
+    try std.testing.expectEqual(@as(u64, 50), report.token_usage_windows[0].total());
     try std.testing.expectEqual(@as(usize, 1), report.allowance_windows.len);
 }

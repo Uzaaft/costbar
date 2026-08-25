@@ -3,7 +3,9 @@ const model = @import("../model.zig");
 const money = @import("../money.zig");
 
 const ModelUsage = struct {
+    id: []const u8,
     model: []const u8,
+    kind: []const u8,
     amount_micros: i64 = 0,
     input: u64 = 0,
     output: u64 = 0,
@@ -74,15 +76,16 @@ pub const Cursor = struct {
             current = std.math.add(i64, current, entry.amount_micros) catch
                 return error.AmountOverflow;
             resources[index] = .{
-                .id = entry.model,
+                .id = entry.id,
                 .name = entry.model,
-                .kind = "model",
+                .kind = entry.kind,
                 .status = .active,
+                .quantity = entry.input +| entry.output +| entry.cache_read +| entry.cache_creation,
             };
             line_items[index] = .{
-                .id = entry.model,
+                .id = entry.id,
                 .description = entry.model,
-                .service = "Models",
+                .service = entry.kind,
                 .amount_micros = entry.amount_micros,
                 .currency = "USD",
             };
@@ -137,19 +140,32 @@ fn parseUsage(
             if (event_value != .object) return error.InvalidResponse;
             const event = event_value.object;
             const name = optionalString(event.get("model")) orelse "Other";
+            const kind = optionalString(event.get("kind")) orelse
+                if (optionalBool(event.get("isTokenBasedCall")) orelse false)
+                    "Usage-based"
+                else
+                    "Subscription included";
             const existing = for (models.items) |*entry| {
-                if (std.mem.eql(u8, entry.model, name)) break entry;
+                if (std.mem.eql(u8, entry.model, name) and
+                    std.mem.eql(u8, entry.kind, kind)) break entry;
             } else null;
             const entry = existing orelse blk: {
-                try models.append(arena, .{ .model = name });
+                try models.append(arena, .{
+                    .id = try std.fmt.allocPrint(arena, "{s}:{s}", .{ kind, name }),
+                    .model = name,
+                    .kind = kind,
+                });
                 break :blk &models.items[models.items.len - 1];
             };
-            entry.amount_micros = std.math.add(
-                i64,
-                entry.amount_micros,
-                try fractionalCentsToMicros(event.get("chargedCents") orelse
-                    return error.InvalidAmount),
-            ) catch return error.AmountOverflow;
+            if (event.get("chargedCents")) |charged| {
+                if (charged != .null) {
+                    entry.amount_micros = std.math.add(
+                        i64,
+                        entry.amount_micros,
+                        try fractionalCentsToMicros(charged),
+                    ) catch return error.AmountOverflow;
+                }
+            }
             if (event.get("tokenUsage")) |tokens_value| {
                 if (tokens_value == .null) continue;
                 if (tokens_value != .object) return error.InvalidResponse;
@@ -204,6 +220,11 @@ fn optionalString(value: ?std.json.Value) ?[]const u8 {
     return if (found == .string) found.string else null;
 }
 
+fn optionalBool(value: ?std.json.Value) ?bool {
+    const found = value orelse return null;
+    return if (found == .bool) found.bool else null;
+}
+
 fn optionalU64(value: ?std.json.Value) !?u64 {
     const found = value orelse return null;
     if (found == .null) return null;
@@ -223,8 +244,9 @@ test "Cursor aggregates charged cents and token classes by model" {
     defer provider.deinit();
     try provider.ingest(std.testing.allocator, "usage-events",
         \\{"period":{"start_unix":1,"end_exclusive_unix":200},"pages":[{"usageEvents":[
-        \\ {"model":"claude","chargedCents":125.5,"tokenUsage":{"inputTokens":80,"outputTokens":10,"cacheReadTokens":20,"cacheWriteTokens":5}},
-        \\ {"model":"claude","chargedCents":24.5,"tokenUsage":{"inputTokens":20,"outputTokens":5}}]}]}
+        \\ {"model":"claude","kind":"Usage-based","chargedCents":125.5,"tokenUsage":{"inputTokens":80,"outputTokens":10,"cacheReadTokens":20,"cacheWriteTokens":5}},
+        \\ {"model":"claude","kind":"Usage-based","chargedCents":24.5,"tokenUsage":{"inputTokens":20,"outputTokens":5}},
+        \\ {"model":"grok","kind":"Included in Business","tokenUsage":{"inputTokens":3,"outputTokens":1}}]}]}
     , 100);
     const report = try provider.collect(std.testing.allocator, .{
         .start_unix = 1,
@@ -232,6 +254,8 @@ test "Cursor aggregates charged cents and token classes by model" {
     });
     defer report.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(i64, 1_500_000), report.summary.current_cost_micros);
-    try std.testing.expectEqual(@as(u64, 100), report.token_usage.?.input_tokens);
+    try std.testing.expectEqual(@as(u64, 103), report.token_usage.?.input_tokens);
     try std.testing.expectEqual(@as(u64, 20), report.token_usage.?.cache_read_tokens);
+    try std.testing.expectEqual(@as(usize, 2), report.line_items.len);
+    try std.testing.expectEqualStrings("Usage-based", report.line_items[0].service);
 }

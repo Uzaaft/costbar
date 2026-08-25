@@ -1,8 +1,15 @@
+import CostbarKit
 import Foundation
 import Security
 
-struct ProviderCredentials: Codable, Equatable, Sendable {
+struct ProviderCredentials: Equatable, Sendable {
     var digitalOceanToken: String?
+    var ovhEndpoint: String?
+    var ovhApplicationKey: String?
+    var ovhApplicationSecret: String?
+    var ovhConsumerKey: String?
+    var ovhProjectID: String?
+    var hetznerToken: String?
     var cloudflareToken: String?
     var cloudflareAccountID: String?
     var runpodAPIKey: String?
@@ -12,6 +19,8 @@ struct ProviderCredentials: Codable, Equatable, Sendable {
     var openRouterManagementKey: String?
     var openAIAdminKey: String?
     var anthropicAdminKey: String?
+    var xAIManagementKey: String?
+    var xAITeamID: String?
     var githubToken: String?
     var githubOrganization: String?
     var cursorAdminKey: String?
@@ -34,47 +43,79 @@ enum CredentialStoreError: Error, LocalizedError {
     }
 }
 
-/// Keeps all provider settings in one login-Keychain item. The decoded value is
-/// cached for the process lifetime so refreshes do not repeatedly ask Keychain
-/// for each individual field.
+/// A macOS Keychain adapter only. Each setting is an independent UTF-8 item;
+/// provider serialization and interpretation stay in Zig.
 @MainActor
 final class CredentialStore {
-    private enum LegacyAccount: String, CaseIterable {
-        case digitalOceanToken = "digitalocean.token"
-        case cloudflareToken = "cloudflare.token"
-        case cloudflareAccountID = "cloudflare.account-id"
+    private struct Field {
+        let account: String
+        let keyPath: WritableKeyPath<ProviderCredentials, String?>
     }
 
-    private let service = "com.costbar.provider-credentials"
-    private let account = "providers"
+    private static let fields: [Field] = [
+        .init(account: "digitalocean.token", keyPath: \.digitalOceanToken),
+        .init(account: "ovh.endpoint", keyPath: \.ovhEndpoint),
+        .init(account: "ovh.application-key", keyPath: \.ovhApplicationKey),
+        .init(account: "ovh.application-secret", keyPath: \.ovhApplicationSecret),
+        .init(account: "ovh.consumer-key", keyPath: \.ovhConsumerKey),
+        .init(account: "ovh.project-id", keyPath: \.ovhProjectID),
+        .init(account: "hetzner.token", keyPath: \.hetznerToken),
+        .init(account: "cloudflare.token", keyPath: \.cloudflareToken),
+        .init(account: "cloudflare.account-id", keyPath: \.cloudflareAccountID),
+        .init(account: "runpod.api-key", keyPath: \.runpodAPIKey),
+        .init(account: "vercel.token", keyPath: \.vercelToken),
+        .init(account: "vercel.team", keyPath: \.vercelTeamIDOrSlug),
+        .init(account: "openrouter.api-key", keyPath: \.openRouterAPIKey),
+        .init(account: "openrouter.management-key", keyPath: \.openRouterManagementKey),
+        .init(account: "openai.admin-key", keyPath: \.openAIAdminKey),
+        .init(account: "anthropic.admin-key", keyPath: \.anthropicAdminKey),
+        .init(account: "xai.management-key", keyPath: \.xAIManagementKey),
+        .init(account: "xai.team-id", keyPath: \.xAITeamID),
+        .init(account: "github.token", keyPath: \.githubToken),
+        .init(account: "github.organization", keyPath: \.githubOrganization),
+        .init(account: "cursor.admin-key", keyPath: \.cursorAdminKey),
+    ]
+
+    private let service: String
+    private let packedAccount = "providers"
     private var cached: ProviderCredentials?
+
+    init(service: String = "com.costbar.provider-credentials") {
+        self.service = service
+    }
 
     func load() throws -> ProviderCredentials {
         if let cached { return cached }
-
-        if let stored = try loadPacked() {
-            cached = stored
-            return stored
+        let packed = try loadData(account: packedAccount)
+        var credentials = if let packed {
+            try decodeLegacyPacked(packed)
+        } else {
+            ProviderCredentials.empty
+        }
+        for field in Self.fields {
+            guard let data = try loadData(account: field.account),
+                  let value = String(data: data, encoding: .utf8)
+            else { continue }
+            credentials[keyPath: field.keyPath] = value
         }
 
-        let migrated = try loadLegacy()
-        if migrated != .empty {
-            try writePacked(migrated)
+        if packed != nil {
+            try writeFields(credentials)
+            try remove(account: packedAccount)
         }
-        cached = migrated
-        return migrated
+        cached = credentials
+        return credentials
     }
 
     func save(_ credentials: ProviderCredentials) throws {
-        try writePacked(credentials)
+        try writeFields(credentials)
         cached = credentials
     }
 
-    private func loadPacked() throws -> ProviderCredentials? {
-        var query = packedQuery
+    private func loadData(account: String) throws -> Data? {
+        var query = matchQuery(account: account)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
-
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         if status == errSecItemNotFound { return nil }
@@ -84,70 +125,63 @@ final class CredentialStore {
         guard let data = result as? Data else {
             throw CredentialStoreError.invalidData
         }
-        do {
-            return try JSONDecoder().decode(ProviderCredentials.self, from: data)
-        } catch {
-            throw CredentialStoreError.invalidData
-        }
+        return data
     }
 
-    /// Imports the original one-item-per-field layout with one Keychain query.
-    /// Old records are left untouched; the packed record takes precedence on
-    /// every subsequent launch.
-    private func loadLegacy() throws -> ProviderCredentials {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecReturnAttributes as String: true,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitAll,
-        ]
-
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &result)
-        if status == errSecItemNotFound { return .empty }
-        guard status == errSecSuccess else {
-            throw CredentialStoreError.unexpectedStatus(status)
-        }
-        guard let items = result as? [[String: Any]] else {
-            throw CredentialStoreError.invalidData
-        }
-
+    private func decodeLegacyPacked(_ data: Data) throws -> ProviderCredentials {
         var credentials = ProviderCredentials.empty
-        for item in items {
-            guard let account = item[kSecAttrAccount as String] as? String,
-                  let data = item[kSecValueData as String] as? Data,
-                  let value = String(data: data, encoding: .utf8)
-            else {
-                continue
+        for field in Self.fields {
+            var value = costbar_bytes_t(ptr: nil, len: 0)
+            let key = Data(field.account.utf8)
+            let status = data.withUnsafeBytes { jsonBuffer in
+                key.withUnsafeBytes { keyBuffer in
+                    costbar_decode_credential_json_field(
+                        jsonBuffer.costbarBytes,
+                        keyBuffer.costbarBytes,
+                        &value
+                    )
+                }
             }
-            switch LegacyAccount(rawValue: account) {
-            case .digitalOceanToken:
-                credentials.digitalOceanToken = value
-            case .cloudflareToken:
-                credentials.cloudflareToken = value
-            case .cloudflareAccountID:
-                credentials.cloudflareAccountID = value
-            case nil:
-                continue
+            guard status == COSTBAR_STATUS_OK else {
+                throw CredentialStoreError.invalidData
+            }
+            defer { costbar_bytes_free(value) }
+            if let pointer = value.ptr {
+                guard let decoded = String(
+                    bytes: UnsafeBufferPointer(start: pointer, count: value.len),
+                    encoding: .utf8
+                ) else {
+                    throw CredentialStoreError.invalidData
+                }
+                credentials[keyPath: field.keyPath] = decoded
             }
         }
         return credentials
     }
 
-    private func writePacked(_ credentials: ProviderCredentials) throws {
-        let data = try JSONEncoder().encode(credentials)
-        let update = [kSecValueData as String: data]
-        let updateStatus = SecItemUpdate(
-            packedQuery as CFDictionary,
-            update as CFDictionary
-        )
-        if updateStatus == errSecSuccess { return }
-        guard updateStatus == errSecItemNotFound else {
-            throw CredentialStoreError.unexpectedStatus(updateStatus)
+    private func writeFields(_ credentials: ProviderCredentials) throws {
+        for field in Self.fields {
+            let value = credentials[keyPath: field.keyPath]
+            if let value, !value.isEmpty {
+                try upsert(Data(value.utf8), account: field.account)
+            } else {
+                try remove(account: field.account)
+            }
         }
+    }
 
-        var insertion = packedQuery
+    private func upsert(_ data: Data, account: String) throws {
+        let query = matchQuery(account: account)
+        let status = SecItemUpdate(
+            query as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary
+        )
+        if status == errSecSuccess { return }
+        guard status == errSecItemNotFound else {
+            throw CredentialStoreError.unexpectedStatus(status)
+        }
+        var insertion = query
+        insertion[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
         insertion[kSecValueData as String] = data
         let addStatus = SecItemAdd(insertion as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
@@ -155,12 +189,24 @@ final class CredentialStore {
         }
     }
 
-    private var packedQuery: [String: Any] {
+    private func remove(account: String) throws {
+        let status = SecItemDelete(matchQuery(account: account) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw CredentialStoreError.unexpectedStatus(status)
+        }
+    }
+
+    private func matchQuery(account: String) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
         ]
+    }
+}
+
+private extension UnsafeRawBufferPointer {
+    var costbarBytes: costbar_bytes_t {
+        .init(ptr: bindMemory(to: UInt8.self).baseAddress, len: count)
     }
 }

@@ -5,6 +5,7 @@ struct BreakdownWindowView: View {
   @State private var section = WindowSection.overview
   @State private var grouping = SpendGrouping.service
   @State private var selectedProviderID: String?
+  @State private var selectedTokenWindowID = "month"
 
   var body: some View {
     HStack(spacing: 0) {
@@ -20,7 +21,12 @@ struct BreakdownWindowView: View {
         .frame(width: 1)
 
       VStack(spacing: 0) {
-        DashboardCommandBar(store: store, grouping: $grouping)
+        DashboardCommandBar(
+          store: store,
+          grouping: $grouping,
+          usageWindows: selectedProvider?.tokenUsageWindows ?? [],
+          selectedTokenWindowID: $selectedTokenWindowID
+        )
 
         Rectangle()
           .fill(WindowPalette.hairline)
@@ -32,14 +38,31 @@ struct BreakdownWindowView: View {
     .frame(minWidth: 1_020, idealWidth: 1_180, minHeight: 650, idealHeight: 760)
     .background(WindowPalette.background)
     .environment(\.colorScheme, .dark)
+    .onChange(of: selectedProviderID) { _, providerID in
+      selectedTokenWindowID = "month"
+      if providerID != nil {
+        grouping = .resource
+      }
+    }
+  }
+
+  private var selectedProvider: Dashboard.ProviderReport? {
+    guard let selectedProviderID else { return nil }
+    return store.dashboard?.providers.first { $0.id == selectedProviderID }
   }
 
   @ViewBuilder
   private var dashboardContent: some View {
-    if let dashboard = store.dashboard, let total = dashboard.primaryTotal {
+    if let dashboard = store.dashboard, let total = displayTotal(in: dashboard) {
+      let selectedProvider = dashboard.providers.first { $0.id == selectedProviderID }
       ScrollView {
         VStack(alignment: .leading, spacing: 24) {
-          DashboardMetrics(dashboard: dashboard, total: total)
+          DashboardMetrics(
+            dashboard: dashboard,
+            total: total,
+            selectedProvider: selectedProvider,
+            selectedTokenWindowID: selectedTokenWindowID
+          )
 
           if let error = store.errorMessage {
             ErrorStrip(message: error)
@@ -62,6 +85,14 @@ struct BreakdownWindowView: View {
         .padding(.top, 28)
         .padding(.bottom, 34)
       }
+    } else if let dashboard = store.dashboard,
+              dashboard.providers.allSatisfy({ $0.summary.status == .notConfigured }) {
+      ContentUnavailableView(
+        "No providers configured",
+        systemImage: "gearshape",
+        description: Text("Add provider credentials or enable a local integration in Settings.")
+      )
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
     } else if let error = store.errorMessage {
       ContentUnavailableView(
         "Unable to load costs",
@@ -74,6 +105,30 @@ struct BreakdownWindowView: View {
         .controlSize(.small)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+  }
+
+  private func displayTotal(in dashboard: Dashboard) -> Dashboard.CurrencyTotal? {
+    guard
+      let selectedProviderID,
+      let report = dashboard.providers.first(where: { $0.id == selectedProviderID })
+    else {
+      return dashboard.primaryTotal
+    }
+
+    let financial = report.financials.first { value in
+      value.currency == report.summary.currency
+    }
+    return Dashboard.CurrencyTotal(
+      currency: financial?.currency ?? report.summary.currency,
+      currentCostMicros: financial?.currentCostMicros ?? report.summary.currentCostMicros,
+      projectedCostMicros: financial?.projectedCostMicros ?? report.summary.projectedCostMicros,
+      creditRemainingMicros: financial?.creditRemainingMicros
+        ?? report.summary.creditRemainingMicros,
+      projectionComplete: financial?.projectedCostMicros != nil
+        || report.summary.projectedCostMicros != nil,
+      creditComplete: financial?.creditRemainingMicros != nil
+        || report.summary.creditRemainingMicros != nil
+    )
   }
 
   private func visibleEntries(
@@ -116,6 +171,7 @@ enum WindowSection: String, CaseIterable, Identifiable {
 enum SpendGrouping: String, CaseIterable, Identifiable {
   case service
   case provider
+  case resource
 
   var id: Self { self }
   var title: String { rawValue.capitalized }
@@ -228,9 +284,7 @@ private struct AccountSidebarButton: View {
   var body: some View {
     Button(action: action) {
       HStack(spacing: 10) {
-        RoundedRectangle(cornerRadius: 2.5, style: .continuous)
-          .fill(ProviderTint.color(for: report.id))
-          .frame(width: 9, height: 9)
+        ProviderLogo(providerID: report.id, size: 17)
 
         Text(report.summary.displayName)
           .lineLimit(1)
@@ -261,10 +315,15 @@ private struct AccountSidebarButton: View {
 private struct DashboardCommandBar: View {
   @ObservedObject var store: DashboardStore
   @Binding var grouping: SpendGrouping
+  let usageWindows: [Dashboard.TokenUsageWindow]
+  @Binding var selectedTokenWindowID: String
 
   var body: some View {
     HStack(spacing: 14) {
-      PeriodSelector()
+      PeriodSelector(
+        windows: usageWindows,
+        selection: $selectedTokenWindowID
+      )
 
       Spacer(minLength: 20)
 
@@ -317,30 +376,51 @@ private struct DashboardCommandBar: View {
 }
 
 private struct PeriodSelector: View {
+  let windows: [Dashboard.TokenUsageWindow]
+  @Binding var selection: String
+
   var body: some View {
     HStack(spacing: 2) {
-      periodButton("Day", enabled: false)
-      periodButton("Month", enabled: true)
-      periodButton("Quarter", enabled: false)
+      periodButton(id: "month", title: "Month")
+      ForEach(windows) { window in
+        periodButton(id: window.id, title: shortLabel(for: window))
+      }
     }
     .padding(3)
     .background(
       RoundedRectangle(cornerRadius: 9, style: .continuous)
         .fill(WindowPalette.controlBackground)
     )
-    .help("Daily and quarterly history will appear when providers expose time-series data.")
+    .help(windows.isEmpty ? "Monthly data" : "Choose a rolling local-usage window")
   }
 
-  private func periodButton(_ title: String, enabled: Bool) -> some View {
-    Text(title)
-      .font(.system(size: 13, weight: enabled ? .semibold : .regular))
-      .foregroundStyle(enabled ? WindowPalette.textPrimary : WindowPalette.textTertiary)
-      .padding(.horizontal, 15)
-      .frame(height: 30)
-      .background(
-        RoundedRectangle(cornerRadius: 7, style: .continuous)
-          .fill(enabled ? WindowPalette.segmentSelected : .clear)
-      )
+  private func periodButton(id: String, title: String) -> some View {
+    Button {
+      selection = id
+    } label: {
+      Text(title)
+        .font(.system(size: 13, weight: selection == id ? .semibold : .regular))
+        .foregroundStyle(
+          selection == id ? WindowPalette.textPrimary : WindowPalette.textSecondary
+        )
+        .padding(.horizontal, 13)
+        .frame(height: 30)
+        .background(
+          RoundedRectangle(cornerRadius: 7, style: .continuous)
+            .fill(selection == id ? WindowPalette.segmentSelected : .clear)
+        )
+    }
+    .buttonStyle(.plain)
+  }
+
+  private func shortLabel(for window: Dashboard.TokenUsageWindow) -> String {
+    switch window.id {
+    case "hour": "1h"
+    case "day": "24h"
+    case "week": "7d"
+    case "thirty-days": "30d"
+    default: window.label
+    }
   }
 }
 
@@ -368,8 +448,22 @@ private struct CommandPill: View {
 private struct DashboardMetrics: View {
   let dashboard: Dashboard
   let total: Dashboard.CurrencyTotal
+  let selectedProvider: Dashboard.ProviderReport?
+  let selectedTokenWindowID: String
 
   var body: some View {
+    if let selectedProvider {
+      AccountMetrics(
+        report: selectedProvider,
+        total: total,
+        selectedTokenWindowID: selectedTokenWindowID
+      )
+    } else {
+      overviewMetrics
+    }
+  }
+
+  private var overviewMetrics: some View {
     HStack(alignment: .bottom, spacing: 34) {
       VStack(alignment: .leading, spacing: 7) {
         MetricLabel("Month to date")
@@ -396,6 +490,197 @@ private struct DashboardMetrics: View {
 
   private var availableProviderCount: Int {
     dashboard.providers.filter { $0.summary.status == .available }.count
+  }
+}
+
+private struct AccountMetrics: View {
+  private struct Value {
+    let title: String
+    let value: String
+  }
+
+  private struct DisplayedUsage {
+    let label: String
+    let inputTokens: UInt64
+    let outputTokens: UInt64
+    let cacheReadTokens: UInt64
+    let totalTokens: UInt64
+  }
+
+  let report: Dashboard.ProviderReport
+  let total: Dashboard.CurrencyTotal
+  let selectedTokenWindowID: String
+
+  private var summary: Dashboard.ProviderSummary { report.summary }
+
+  var body: some View {
+    HStack(alignment: .bottom, spacing: 34) {
+      VStack(alignment: .leading, spacing: 7) {
+        MetricLabel(primaryTitle)
+        primaryValue
+      }
+      .frame(maxWidth: .infinity, alignment: .leading)
+
+      ForEach(Array(secondaryValues.enumerated()), id: \.offset) { _, metric in
+        MetricValue(title: metric.title, value: metric.value)
+      }
+    }
+  }
+
+  private var primaryTitle: String {
+    if summary.status != .available { return summary.displayName }
+    if usesTokensAsPrimary { return displayedUsage?.label ?? "Tokens this month" }
+    return "Month to date"
+  }
+
+  @ViewBuilder
+  private var primaryValue: some View {
+    if summary.status != .available {
+      HeroTextAmount(value: providerStatusText)
+    } else if usesTokensAsPrimary, let usage = displayedUsage {
+      HeroTextAmount(value: tokenText(usage.totalTokens))
+    } else {
+      HeroCurrencyAmount(micros: total.currentCostMicros, currency: total.currency)
+    }
+  }
+
+  private var usesTokensAsPrimary: Bool {
+    !summary.contributesToTotals && report.tokenUsage != nil
+  }
+
+  private var secondaryValues: [Value] {
+    var values: [Value] = []
+
+    if summary.status != .available {
+      values.append(Value(title: "Status", value: providerStatusText))
+      values.append(Value(title: "Account type", value: accountType))
+      values.append(Value(title: "Last updated", value: lastUpdatedText))
+      return values
+    }
+
+    if let projected = total.projectedCostMicros {
+      values.append(
+        Value(title: "Projected", value: projected.currencyText(code: total.currency))
+      )
+    }
+    if let credit = total.creditRemainingMicros {
+      values.append(
+        Value(title: "Credit remaining", value: credit.currencyText(code: total.currency))
+      )
+    }
+
+    values.append(contentsOf: additionalCurrencyValues)
+    if !prioritizesSelectedWindow {
+      values.append(contentsOf: report.allowanceWindows.map(allowanceValue))
+    }
+
+    if let usage = displayedUsage {
+      if usesTokensAsPrimary {
+        values.append(Value(title: "Input tokens", value: tokenText(usage.inputTokens)))
+        values.append(Value(title: "Output tokens", value: tokenText(usage.outputTokens)))
+        values.append(Value(title: "Cached tokens", value: tokenText(usage.cacheReadTokens)))
+      } else {
+        values.append(Value(title: "Total tokens", value: tokenText(usage.totalTokens)))
+      }
+    }
+    if prioritizesSelectedWindow {
+      values.append(contentsOf: report.allowanceWindows.map(allowanceValue))
+    }
+
+    if !report.resources.isEmpty {
+      values.append(Value(title: "Resources", value: resourceCountText))
+    }
+    if !report.lineItems.isEmpty {
+      values.append(Value(title: "Billed services", value: "\(serviceCount)"))
+    }
+    values.append(Value(title: "Last updated", value: lastUpdatedText))
+    values.append(Value(title: "Account type", value: accountType))
+
+    return Array(values.prefix(3))
+  }
+
+  private var providerStatusText: String {
+    switch summary.status {
+    case .available: "Available"
+    case .notConfigured: "Not configured"
+    case .unavailable: "Unavailable"
+    }
+  }
+
+  private var displayedUsage: DisplayedUsage? {
+    if selectedTokenWindowID != "month",
+       let window = report.tokenUsageWindows.first(where: { $0.id == selectedTokenWindowID }) {
+      return DisplayedUsage(
+        label: "Tokens · (window.label)",
+        inputTokens: window.inputTokens,
+        outputTokens: window.outputTokens,
+        cacheReadTokens: window.cacheReadTokens,
+        totalTokens: window.totalTokens
+      )
+    }
+    guard let usage = report.tokenUsage else { return nil }
+    return DisplayedUsage(
+      label: "Tokens this month",
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      cacheReadTokens: usage.cacheReadTokens,
+      totalTokens: usage.totalTokens
+    )
+  }
+
+  private var prioritizesSelectedWindow: Bool {
+    usesTokensAsPrimary && selectedTokenWindowID != "month"
+  }
+
+  private var additionalCurrencyValues: [Value] {
+    report.financials.compactMap { financial in
+      guard financial.currency != total.currency else { return nil }
+      return Value(
+        title: "Month to date (\(financial.currency))",
+        value: financial.currentCostMicros.currencyText(code: financial.currency)
+      )
+    }
+  }
+
+  private func allowanceValue(_ window: Dashboard.AllowanceWindow) -> Value {
+    let precision = window.usedPercent.rounded() == window.usedPercent ? 0 : 1
+    let percent = window.usedPercent.formatted(
+      .number.precision(.fractionLength(precision)).locale(MoneyFormat.locale)
+    )
+    return Value(title: "\(window.label) usage", value: "\(percent)%")
+  }
+
+  private func tokenText(_ tokens: UInt64) -> String {
+    tokens.formatted(
+      .number
+        .notation(.compactName)
+        .precision(.fractionLength(0...1))
+        .locale(MoneyFormat.locale)
+    )
+  }
+
+  private var resourceCountText: String {
+    let quantity = report.resources.reduce(UInt64(0)) { partial, resource in
+      let (sum, overflow) = partial.addingReportingOverflow(resource.quantity)
+      return overflow ? .max : sum
+    }
+    return tokenText(quantity)
+  }
+
+  private var serviceCount: Int {
+    Set(report.lineItems.map(\.service)).count
+  }
+
+  private var accountType: String {
+    summary.kind.replacingOccurrences(of: "_", with: " ").capitalized
+  }
+
+  private var lastUpdatedText: String {
+    guard summary.updatedAtUnix > 0 else { return "Never" }
+    return Date(timeIntervalSince1970: TimeInterval(summary.updatedAtUnix)).formatted(
+      date: .abbreviated,
+      time: .shortened
+    )
   }
 }
 
@@ -456,6 +741,19 @@ private struct HeroCurrencyAmount: View {
   }
 }
 
+private struct HeroTextAmount: View {
+  let value: String
+
+  var body: some View {
+    Text(value)
+      .font(.system(size: 46, weight: .light))
+      .monospacedDigit()
+      .foregroundStyle(WindowPalette.textPrimary)
+      .lineLimit(1)
+      .minimumScaleFactor(0.65)
+  }
+}
+
 private struct ErrorStrip: View {
   let message: String
 
@@ -470,26 +768,6 @@ private struct ErrorStrip: View {
     .foregroundStyle(WindowPalette.warning)
     .padding(12)
     .background(WindowPalette.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
-  }
-}
-
-enum ProviderTint {
-  static func color(for id: String) -> Color {
-    switch id {
-    case "digitalocean": Color(red: 0.22, green: 0.49, blue: 0.96)
-    case "cloudflare": Color(red: 0.95, green: 0.49, blue: 0.20)
-    case "runpod": Color(red: 0.40, green: 0.78, blue: 0.55)
-    case "vercel": Color(red: 0.91, green: 0.91, blue: 0.94)
-    case "openrouter": Color(red: 0.51, green: 0.46, blue: 0.93)
-    case "subscriptions": Color(red: 0.73, green: 0.45, blue: 0.91)
-    case "codex": Color(red: 0.23, green: 0.75, blue: 0.66)
-    case "claude": Color(red: 0.82, green: 0.44, blue: 0.29)
-    case "openai-api": Color(red: 0.22, green: 0.72, blue: 0.62)
-    case "anthropic-api": Color(red: 0.78, green: 0.43, blue: 0.26)
-    case "github": Color(red: 0.65, green: 0.65, blue: 0.72)
-    case "cursor": Color(red: 0.55, green: 0.70, blue: 0.98)
-    default: WindowPalette.blue
-    }
   }
 }
 

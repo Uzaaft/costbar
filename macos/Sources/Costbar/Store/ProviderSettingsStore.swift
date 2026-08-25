@@ -3,6 +3,12 @@ import Foundation
 @MainActor
 final class ProviderSettingsStore: ObservableObject {
     @Published var digitalOceanToken = ""
+    @Published var ovhEndpoint = "ovh-eu"
+    @Published var ovhApplicationKey = ""
+    @Published var ovhApplicationSecret = ""
+    @Published var ovhConsumerKey = ""
+    @Published var ovhProjectID = ""
+    @Published var hetznerToken = ""
     @Published var cloudflareToken = ""
     @Published var cloudflareAccountID = ""
     @Published var runpodAPIKey = ""
@@ -12,12 +18,15 @@ final class ProviderSettingsStore: ObservableObject {
     @Published var openRouterManagementKey = ""
     @Published var openAIAdminKey = ""
     @Published var anthropicAdminKey = ""
+    @Published var xAIManagementKey = ""
+    @Published var xAITeamID = ""
     @Published var githubToken = ""
     @Published var githubOrganization = ""
+    @Published var usesGitHubCLI = false
     @Published var cursorAdminKey = ""
-    @Published var subscriptions: [RecurringSubscription] = []
     @Published var tracksCodexUsage = false
     @Published var tracksClaudeUsage = false
+    @Published var tracksOpenCodeUsage = false
     @Published private(set) var hasClaudeStatusBridge = false
     @Published private(set) var message: String?
 
@@ -32,6 +41,12 @@ final class ProviderSettingsStore: ObservableObject {
         do {
             try credentials.save(.init(
                 digitalOceanToken: digitalOceanToken.trimmedOrNil,
+                ovhEndpoint: ovhEndpoint.trimmedOrNil,
+                ovhApplicationKey: ovhApplicationKey.trimmedOrNil,
+                ovhApplicationSecret: ovhApplicationSecret.trimmedOrNil,
+                ovhConsumerKey: ovhConsumerKey.trimmedOrNil,
+                ovhProjectID: ovhProjectID.trimmedOrNil,
+                hetznerToken: hetznerToken.trimmedOrNil,
                 cloudflareToken: cloudflareToken.trimmedOrNil,
                 cloudflareAccountID: cloudflareAccountID.trimmedOrNil,
                 runpodAPIKey: runpodAPIKey.trimmedOrNil,
@@ -41,16 +56,19 @@ final class ProviderSettingsStore: ObservableObject {
                 openRouterManagementKey: openRouterManagementKey.trimmedOrNil,
                 openAIAdminKey: openAIAdminKey.trimmedOrNil,
                 anthropicAdminKey: anthropicAdminKey.trimmedOrNil,
+                xAIManagementKey: xAIManagementKey.trimmedOrNil,
+                xAITeamID: xAITeamID.trimmedOrNil,
                 githubToken: githubToken.trimmedOrNil,
                 githubOrganization: githubOrganization.trimmedOrNil,
                 cursorAdminKey: cursorAdminKey.trimmedOrNil
             ))
-            SubscriptionSettings.save(subscriptions)
             LocalAISettings.save(
                 tracksCodex: tracksCodexUsage,
-                tracksClaude: tracksClaudeUsage
+                tracksClaude: tracksClaudeUsage,
+                tracksOpenCode: tracksOpenCodeUsage
             )
-            message = "Credentials saved in Keychain."
+            CLIAuthSettings.saveGitHubCLI(usesGitHubCLI)
+            message = "Settings saved. Credentials remain in Keychain."
             return true
         } catch {
             message = error.localizedDescription
@@ -62,6 +80,12 @@ final class ProviderSettingsStore: ObservableObject {
         do {
             let saved = try credentials.load()
             digitalOceanToken = saved.digitalOceanToken ?? ""
+            ovhEndpoint = saved.ovhEndpoint ?? "ovh-eu"
+            ovhApplicationKey = saved.ovhApplicationKey ?? ""
+            ovhApplicationSecret = saved.ovhApplicationSecret ?? ""
+            ovhConsumerKey = saved.ovhConsumerKey ?? ""
+            ovhProjectID = saved.ovhProjectID ?? ""
+            hetznerToken = saved.hetznerToken ?? ""
             cloudflareToken = saved.cloudflareToken ?? ""
             cloudflareAccountID = saved.cloudflareAccountID ?? ""
             runpodAPIKey = saved.runpodAPIKey ?? ""
@@ -71,24 +95,19 @@ final class ProviderSettingsStore: ObservableObject {
             openRouterManagementKey = saved.openRouterManagementKey ?? ""
             openAIAdminKey = saved.openAIAdminKey ?? ""
             anthropicAdminKey = saved.anthropicAdminKey ?? ""
+            xAIManagementKey = saved.xAIManagementKey ?? ""
+            xAITeamID = saved.xAITeamID ?? ""
             githubToken = saved.githubToken ?? ""
             githubOrganization = saved.githubOrganization ?? ""
             cursorAdminKey = saved.cursorAdminKey ?? ""
         } catch {
             message = error.localizedDescription
         }
-        subscriptions = SubscriptionSettings.load()
         tracksCodexUsage = LocalAISettings.tracksCodex()
         tracksClaudeUsage = LocalAISettings.tracksClaude()
+        tracksOpenCodeUsage = LocalAISettings.tracksOpenCode()
+        usesGitHubCLI = CLIAuthSettings.usesGitHubCLI()
         hasClaudeStatusBridge = ClaudeStatusLineBridge.isInstalled
-    }
-
-    func addSubscription() {
-        subscriptions.append(.empty())
-    }
-
-    func removeSubscription(id: String) {
-        subscriptions.removeAll { $0.id == id }
     }
 
     func installClaudeStatusBridge() {

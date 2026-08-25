@@ -15,7 +15,6 @@ pub const ProviderKind = enum {
     cloud,
     ai,
     developer_tool,
-    subscription,
     other,
 };
 
@@ -27,6 +26,7 @@ pub const ProviderMetadata = struct {
 
 pub const ProviderStatus = enum {
     available,
+    not_configured,
     unavailable,
 };
 
@@ -102,6 +102,29 @@ pub const TokenUsage = struct {
     }
 };
 
+/// A named rolling slice of the same local token history as `TokenUsage`.
+/// Providers can expose comparable windows without leaking their log schema
+/// into the dashboard or native UI.
+pub const TokenUsageWindow = struct {
+    id: []const u8,
+    label: []const u8,
+    period: Period,
+    input_tokens: u64 = 0,
+    output_tokens: u64 = 0,
+    cache_read_tokens: u64 = 0,
+    cache_creation_tokens: u64 = 0,
+    reasoning_tokens: u64 = 0,
+
+    pub fn total(self: TokenUsageWindow) u64 {
+        var result = self.input_tokens;
+        result +|= self.output_tokens;
+        result +|= self.cache_read_tokens;
+        result +|= self.cache_creation_tokens;
+        result +|= self.reasoning_tokens;
+        return result;
+    }
+};
+
 pub const ProviderSummary = struct {
     id: []const u8,
     display_name: []const u8,
@@ -112,8 +135,7 @@ pub const ProviderSummary = struct {
     current_cost_micros: i64,
     projected_cost_micros: ?i64 = null,
     credit_remaining_micros: ?i64 = null,
-    /// False for usage-only providers whose subscription fee is represented by
-    /// the recurring-subscriptions provider.
+    /// False for usage-only providers that do not expose billable cost.
     contributes_to_totals: bool = true,
     updated_at_unix: i64,
 };
@@ -127,6 +149,7 @@ pub const ProviderReport = struct {
     line_items: []CostLineItem,
     allowance_windows: []AllowanceWindow = &.{},
     token_usage: ?TokenUsage = null,
+    token_usage_windows: []TokenUsageWindow = &.{},
     /// Optional multi-currency financial values. When empty, the legacy
     /// financial fields on `summary` remain authoritative.
     financials: []FinancialSummary = &.{},
@@ -135,6 +158,7 @@ pub const ProviderReport = struct {
         allocator.free(self.resources);
         allocator.free(self.line_items);
         if (self.allowance_windows.len > 0) allocator.free(self.allowance_windows);
+        if (self.token_usage_windows.len > 0) allocator.free(self.token_usage_windows);
         if (self.financials.len > 0) allocator.free(self.financials);
     }
 };

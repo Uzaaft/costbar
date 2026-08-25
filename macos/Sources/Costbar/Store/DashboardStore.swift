@@ -1,6 +1,29 @@
 import Foundation
 
 @MainActor
+protocol DashboardCore: AnyObject {
+    func cachedSnapshot(period: Dashboard.Period) throws -> Dashboard?
+    func snapshot(period: Dashboard.Period) throws -> Dashboard
+    func refresh(
+        credentials: ProviderCredentials,
+        period: Dashboard.Period,
+        trackCodex: Bool,
+        trackClaude: Bool,
+        trackOpenCode: Bool,
+        useGitHubCLI: Bool
+    ) async throws -> CostbarCore.RefreshReport
+}
+
+extension CostbarCore: DashboardCore {}
+
+@MainActor
+protocol DashboardCredentials: AnyObject {
+    func load() throws -> ProviderCredentials
+}
+
+extension CredentialStore: DashboardCredentials {}
+
+@MainActor
 final class DashboardStore: ObservableObject {
     @Published private(set) var dashboard: Dashboard?
     @Published private(set) var errorMessage: String?
@@ -8,20 +31,33 @@ final class DashboardStore: ObservableObject {
     @Published private(set) var dataSourceLabel = "not configured"
     @Published private(set) var lastUpdatedAt: Date?
 
-    private let core: CostbarCore?
-    private let credentials: CredentialStore
-    private let apiClient: ProviderAPIClient
+    private var core: (any DashboardCore)?
+    private let credentials: any DashboardCredentials
+    private let pollingInterval: Duration
     private var refreshTask: Task<Void, Never>?
+    private var pollingTask: Task<Void, Never>?
 
     init(
-        credentials: CredentialStore = CredentialStore(),
-        apiClient: ProviderAPIClient = ProviderAPIClient()
+        credentials: any DashboardCredentials = CredentialStore(),
+        pollingInterval: Duration = .seconds(300),
+        automaticallyRefreshes: Bool = true,
+        coreFactory: () throws -> any DashboardCore = { try CostbarCore() }
     ) {
         self.credentials = credentials
-        self.apiClient = apiClient
+        self.pollingInterval = pollingInterval
         do {
-            core = try CostbarCore()
-            refresh()
+            let core = try coreFactory()
+            self.core = core
+            let period = Dashboard.Period.currentMonth()
+            if let cached = try core.cachedSnapshot(period: period) {
+                dashboard = cached
+                dataSourceLabel = "cached"
+                lastUpdatedAt = Date(timeIntervalSince1970: TimeInterval(cached.generatedAtUnix))
+            }
+            if automaticallyRefreshes {
+                refresh()
+                startPolling()
+            }
         } catch {
             core = nil
             errorMessage = error.localizedDescription
@@ -43,199 +79,57 @@ final class DashboardStore: ObservableObject {
         }
     }
 
-    private func refresh(core: CostbarCore) async {
+    private func refresh(core: any DashboardCore) async {
         defer { isRefreshing = false }
         let period = Dashboard.Period.currentMonth()
+        let hadDashboard = dashboard != nil
+        var errors: [String] = []
         var configuredProviderCount = 0
         var refreshedProviderCount = 0
-        var errors: [String] = []
+        var completedRefresh = false
+        var saved: ProviderCredentials?
 
         do {
-            let saved = try credentials.load()
-            if let token = saved.digitalOceanToken,
-               !token.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshDigitalOcean(token: token, core: core)
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
-
-            let cloudflareToken = saved.cloudflareToken
-            let cloudflareAccountID = saved.cloudflareAccountID
-            if let token = cloudflareToken, !token.isEmpty,
-               let accountID = cloudflareAccountID, !accountID.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshCloudflare(
-                        token: token,
-                        accountID: accountID,
-                        core: core
-                    )
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
-
-            if let apiKey = saved.runpodAPIKey,
-               !apiKey.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshRunpod(
-                        apiKey: apiKey,
-                        period: period,
-                        core: core
-                    )
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
-
-            if let token = saved.vercelToken,
-               !token.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshVercel(
-                        token: token,
-                        teamIDOrSlug: saved.vercelTeamIDOrSlug,
-                        period: period,
-                        core: core
-                    )
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
-
-            if let apiKey = saved.openRouterAPIKey,
-               !apiKey.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshOpenRouter(
-                        apiKey: apiKey,
-                        managementKey: saved.openRouterManagementKey,
-                        period: period,
-                        core: core
-                    )
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
-
-            if let adminKey = saved.openAIAdminKey, !adminKey.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshOpenAIOrganization(
-                        adminKey: adminKey,
-                        period: period,
-                        core: core
-                    )
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
-
-            if let adminKey = saved.anthropicAdminKey, !adminKey.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshAnthropicOrganization(
-                        adminKey: adminKey,
-                        period: period,
-                        core: core
-                    )
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
-
-            if let token = saved.githubToken, !token.isEmpty,
-               let organization = saved.githubOrganization, !organization.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshGitHub(
-                        token: token,
-                        organization: organization,
-                        period: period,
-                        core: core
-                    )
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
-
-            if let adminKey = saved.cursorAdminKey, !adminKey.isEmpty {
-                configuredProviderCount += 1
-                do {
-                    try await apiClient.refreshCursor(
-                        adminKey: adminKey,
-                        period: period,
-                        core: core
-                    )
-                    refreshedProviderCount += 1
-                } catch {
-                    errors.append(error.localizedDescription)
-                }
-            }
+            saved = try credentials.load()
         } catch {
             errors.append(error.localizedDescription)
         }
 
-        let subscriptions = SubscriptionSettings.load()
-        do {
-            let payload = try SubscriptionSettings.snapshotData(from: subscriptions)
-            try core.ingest(
-                providerID: "subscriptions",
-                documentID: "subscriptions",
-                data: payload
-            )
-            if !subscriptions.isEmpty {
-                configuredProviderCount += 1
-                refreshedProviderCount += 1
-            }
-        } catch where !subscriptions.isEmpty {
-            configuredProviderCount += 1
-            errors.append(error.localizedDescription)
-        } catch {
-            // An empty subscription list deliberately leaves the provider unavailable.
-        }
-
-        if LocalAISettings.tracksCodex() {
-            configuredProviderCount += 1
+        if let saved {
             do {
-                let payload = try await LocalAIUsageCollector.codex(period: period)
-                try core.ingest(providerID: "codex", documentID: "usage", data: payload)
-                refreshedProviderCount += 1
+                let report = try await core.refresh(
+                    credentials: saved,
+                    period: period,
+                    trackCodex: LocalAISettings.tracksCodex(),
+                    trackClaude: LocalAISettings.tracksClaude(),
+                    trackOpenCode: LocalAISettings.tracksOpenCode(),
+                    useGitHubCLI: CLIAuthSettings.usesGitHubCLI()
+                )
+                completedRefresh = true
+                configuredProviderCount = report.configuredCount
+                refreshedProviderCount = report.refreshedCount
+                if let message = report.errors { errors.append(message) }
             } catch {
                 errors.append(error.localizedDescription)
             }
         }
 
-        if LocalAISettings.tracksClaude() {
-            configuredProviderCount += 1
+        let shouldPublishSnapshot = !hadDashboard || (
+            completedRefresh &&
+                (configuredProviderCount == 0 || refreshedProviderCount > 0)
+        )
+        if shouldPublishSnapshot {
             do {
-                let payload = try await LocalAIUsageCollector.claude(period: period)
-                try core.ingest(providerID: "claude", documentID: "usage", data: payload)
-                refreshedProviderCount += 1
+                dashboard = try core.snapshot(period: period)
+                lastUpdatedAt = .now
             } catch {
                 errors.append(error.localizedDescription)
             }
         }
 
-        do {
-            dashboard = try core.snapshot(period: period)
-        } catch {
-            errors.append(error.localizedDescription)
-        }
-
-        dataSourceLabel = if configuredProviderCount == 0 {
+        dataSourceLabel = if !completedRefresh {
+            hadDashboard ? "stale" : "unavailable"
+        } else if configuredProviderCount == 0 {
             "not configured"
         } else if refreshedProviderCount == configuredProviderCount {
             "live"
@@ -243,6 +137,34 @@ final class DashboardStore: ObservableObject {
             "stale"
         }
         errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
-        lastUpdatedAt = .now
+    }
+
+    private func startPolling() {
+        pollingTask?.cancel()
+        let interval = pollingInterval
+        pollingTask = Task { [weak self] in
+            await RefreshPolling.run(every: interval) { [weak self] in
+                self?.refresh()
+            }
+        }
+    }
+
+    func stopPolling() {
+        pollingTask?.cancel()
+        pollingTask = nil
+    }
+}
+
+@MainActor
+enum RefreshPolling {
+    static func run(every interval: Duration, action: @escaping () -> Void) async {
+        while !Task.isCancelled {
+            do {
+                try await Task.sleep(for: interval)
+            } catch {
+                return
+            }
+            action()
+        }
     }
 }

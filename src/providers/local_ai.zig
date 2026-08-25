@@ -8,6 +8,39 @@ pub fn LocalAI(
     return struct {
         const Self = @This();
 
+        pub const TokenCounts = struct {
+            input_tokens: u64 = 0,
+            output_tokens: u64 = 0,
+            cache_read_tokens: u64 = 0,
+            cache_creation_tokens: u64 = 0,
+            reasoning_tokens: u64 = 0,
+        };
+
+        pub const UsageWindow = struct {
+            id: []const u8,
+            label: []const u8,
+            period: model.Period,
+            token_usage: TokenCounts = .{},
+        };
+
+        pub const Allowance = struct {
+            id: []const u8,
+            label: []const u8,
+            used_percent: f64,
+            resets_at_unix: ?i64 = null,
+            detail: ?[]const u8 = null,
+        };
+
+        pub const Snapshot = struct {
+            period: model.Period,
+            token_usage: TokenCounts = .{},
+            allowance_windows: []const Allowance = &.{},
+            token_usage_windows: []const UsageWindow = &.{},
+            models: []const []const u8 = &.{},
+            source: []const u8,
+            updated_at_unix: i64,
+        };
+
         const OwnedSnapshot = struct {
             arena: std.heap.ArenaAllocator,
             period: model.Period,
@@ -19,6 +52,7 @@ pub fn LocalAI(
             source: []const u8,
             updated_at_unix: i64,
             allowances: []const RawAllowance,
+            usage_windows: []const RawUsageWindow,
             models: []const []const u8,
 
             fn deinit(self: *OwnedSnapshot) void {
@@ -42,10 +76,18 @@ pub fn LocalAI(
             reasoning_tokens: u64 = 0,
         };
 
+        const RawUsageWindow = struct {
+            id: []const u8,
+            label: []const u8,
+            period: model.Period,
+            token_usage: RawTokens = .{},
+        };
+
         const RawSnapshot = struct {
             period: model.Period,
             token_usage: RawTokens = .{},
             allowance_windows: []const RawAllowance = &.{},
+            token_usage_windows: []const RawUsageWindow = &.{},
             models: []const []const u8 = &.{},
             source: []const u8,
             updated_at_unix: ?i64 = null,
@@ -86,6 +128,76 @@ pub fn LocalAI(
             self.snapshot = replacement;
         }
 
+        /// Replaces local usage from already-normalized Zig data. This is the
+        /// production path; JSON ingestion remains as a compatibility ABI.
+        pub fn update(
+            self: *Self,
+            allocator: std.mem.Allocator,
+            input: Snapshot,
+        ) !void {
+            try input.period.validate();
+            var replacement = OwnedSnapshot{
+                .arena = .init(allocator),
+                .period = input.period,
+                .input_tokens = input.token_usage.input_tokens,
+                .output_tokens = input.token_usage.output_tokens,
+                .cache_read_tokens = input.token_usage.cache_read_tokens,
+                .cache_creation_tokens = input.token_usage.cache_creation_tokens,
+                .reasoning_tokens = input.token_usage.reasoning_tokens,
+                .source = undefined,
+                .updated_at_unix = input.updated_at_unix,
+                .allowances = undefined,
+                .usage_windows = undefined,
+                .models = undefined,
+            };
+            errdefer replacement.deinit();
+            const arena = replacement.arena.allocator();
+            replacement.source = try arena.dupe(u8, input.source);
+            const models = try arena.alloc([]const u8, input.models.len);
+            for (input.models, 0..) |name, index| {
+                models[index] = try arena.dupe(u8, name);
+            }
+            replacement.models = models;
+            const allowances = try arena.alloc(RawAllowance, input.allowance_windows.len);
+            for (input.allowance_windows, 0..) |allowance, index| {
+                if (!std.math.isFinite(allowance.used_percent) or
+                    allowance.used_percent < 0 or allowance.used_percent > 100)
+                {
+                    return error.InvalidAllowance;
+                }
+                allowances[index] = .{
+                    .id = try arena.dupe(u8, allowance.id),
+                    .label = try arena.dupe(u8, allowance.label),
+                    .used_percent = allowance.used_percent,
+                    .resets_at_unix = allowance.resets_at_unix,
+                    .detail = if (allowance.detail) |detail|
+                        try arena.dupe(u8, detail)
+                    else
+                        null,
+                };
+            }
+            replacement.allowances = allowances;
+            const usage_windows = try arena.alloc(RawUsageWindow, input.token_usage_windows.len);
+            for (input.token_usage_windows, 0..) |window, index| {
+                try window.period.validate();
+                usage_windows[index] = .{
+                    .id = try arena.dupe(u8, window.id),
+                    .label = try arena.dupe(u8, window.label),
+                    .period = window.period,
+                    .token_usage = .{
+                        .input_tokens = window.token_usage.input_tokens,
+                        .output_tokens = window.token_usage.output_tokens,
+                        .cache_read_tokens = window.token_usage.cache_read_tokens,
+                        .cache_creation_tokens = window.token_usage.cache_creation_tokens,
+                        .reasoning_tokens = window.token_usage.reasoning_tokens,
+                    },
+                };
+            }
+            replacement.usage_windows = usage_windows;
+            if (self.snapshot) |*existing| existing.deinit();
+            self.snapshot = replacement;
+        }
+
         pub fn collect(
             self: *Self,
             allocator: std.mem.Allocator,
@@ -120,6 +232,24 @@ pub fn LocalAI(
                 };
             }
 
+            const usage_windows: []model.TokenUsageWindow = if (snapshot.usage_windows.len == 0)
+                &.{}
+            else
+                try allocator.alloc(model.TokenUsageWindow, snapshot.usage_windows.len);
+            errdefer if (usage_windows.len > 0) allocator.free(usage_windows);
+            for (snapshot.usage_windows, 0..) |window, index| {
+                usage_windows[index] = .{
+                    .id = window.id,
+                    .label = window.label,
+                    .period = window.period,
+                    .input_tokens = window.token_usage.input_tokens,
+                    .output_tokens = window.token_usage.output_tokens,
+                    .cache_read_tokens = window.token_usage.cache_read_tokens,
+                    .cache_creation_tokens = window.token_usage.cache_creation_tokens,
+                    .reasoning_tokens = window.token_usage.reasoning_tokens,
+                };
+            }
+
             return .{
                 .summary = .{
                     .id = provider_id,
@@ -143,6 +273,7 @@ pub fn LocalAI(
                     .source = snapshot.source,
                     .updated_at_unix = snapshot.updated_at_unix,
                 },
+                .token_usage_windows = usage_windows,
             };
         }
 
@@ -162,6 +293,7 @@ pub fn LocalAI(
                 .source = "",
                 .updated_at_unix = received_at_unix,
                 .allowances = &.{},
+                .usage_windows = &.{},
                 .models = &.{},
             };
             errdefer result.deinit();
@@ -188,6 +320,8 @@ pub fn LocalAI(
             result.source = raw.source;
             result.updated_at_unix = raw.updated_at_unix orelse received_at_unix;
             result.allowances = raw.allowance_windows;
+            for (raw.token_usage_windows) |window| try window.period.validate();
+            result.usage_windows = raw.token_usage_windows;
             result.models = raw.models;
             return result;
         }
