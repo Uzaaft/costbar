@@ -4,9 +4,15 @@ const money = @import("../money.zig");
 
 const ProductCost = struct {
     id: []const u8,
+    organization: []const u8,
     product: []const u8,
     sku: []const u8,
     amount_micros: i64,
+};
+
+pub const OrganizationUsage = struct {
+    organization: []const u8,
+    payload: []const u8,
 };
 
 const OwnedUsage = struct {
@@ -45,7 +51,24 @@ pub const GitHub = struct {
         if (!std.mem.eql(u8, document_id, "billing-usage")) {
             return error.UnsupportedDocument;
         }
-        var replacement = try parseUsage(allocator, payload, received_at_unix);
+        var replacement = try parseUsage(
+            allocator,
+            &.{.{ .organization = "", .payload = payload }},
+            received_at_unix,
+        );
+        errdefer replacement.deinit();
+        if (self.usage) |*existing| existing.deinit();
+        self.usage = replacement;
+    }
+
+    pub fn ingestOrganizations(
+        self: *GitHub,
+        allocator: std.mem.Allocator,
+        documents: []const OrganizationUsage,
+        received_at_unix: i64,
+    ) !void {
+        if (documents.len == 0) return error.InvalidResponse;
+        var replacement = try parseUsage(allocator, documents, received_at_unix);
         errdefer replacement.deinit();
         if (self.usage) |*existing| existing.deinit();
         self.usage = replacement;
@@ -77,6 +100,7 @@ pub const GitHub = struct {
                 .service = cost.product,
                 .amount_micros = cost.amount_micros,
                 .currency = "USD",
+                .detail = if (cost.organization.len == 0) null else cost.organization,
             };
         }
         return .{
@@ -96,7 +120,7 @@ pub const GitHub = struct {
 
 fn parseUsage(
     allocator: std.mem.Allocator,
-    payload: []const u8,
+    documents: []const OrganizationUsage,
     received_at_unix: i64,
 ) !OwnedUsage {
     var result = OwnedUsage{
@@ -106,14 +130,28 @@ fn parseUsage(
     };
     errdefer result.deinit();
     const arena = result.arena.allocator();
-    const value = try std.json.parseFromSliceLeaky(std.json.Value, arena, payload, .{
+    var costs: std.ArrayList(ProductCost) = .empty;
+    for (documents) |document| {
+        try appendUsageDocument(arena, &costs, document);
+    }
+    result.costs = try costs.toOwnedSlice(arena);
+    std.mem.sort(ProductCost, result.costs, {}, costDescending);
+    return result;
+}
+
+fn appendUsageDocument(
+    arena: std.mem.Allocator,
+    costs: *std.ArrayList(ProductCost),
+    document: OrganizationUsage,
+) !void {
+    const value = try std.json.parseFromSliceLeaky(std.json.Value, arena, document.payload, .{
         .allocate = .alloc_always,
         .parse_numbers = false,
     });
     if (value != .object) return error.InvalidResponse;
     const items_value = value.object.get("usageItems") orelse return error.InvalidResponse;
     if (items_value != .array) return error.InvalidResponse;
-    var costs: std.ArrayList(ProductCost) = .empty;
+    const organization = try arena.dupe(u8, document.organization);
     for (items_value.array.items) |item_value| {
         if (item_value != .object) return error.InvalidResponse;
         const item = item_value.object;
@@ -121,24 +159,31 @@ fn parseUsage(
         const sku = optionalString(item.get("sku")) orelse "Usage";
         const amount = try numberMicros(item.get("netAmount") orelse return error.InvalidAmount);
         const existing = for (costs.items) |*cost| {
-            if (std.mem.eql(u8, cost.product, product) and
+            if (std.mem.eql(u8, cost.organization, organization) and
+                std.mem.eql(u8, cost.product, product) and
                 std.mem.eql(u8, cost.sku, sku)) break cost;
         } else null;
         if (existing) |cost| {
             cost.amount_micros = std.math.add(i64, cost.amount_micros, amount) catch
                 return error.AmountOverflow;
         } else {
+            const id = if (organization.len == 0)
+                try std.fmt.allocPrint(arena, "{s}:{s}", .{ product, sku })
+            else
+                try std.fmt.allocPrint(
+                    arena,
+                    "{s}:{s}:{s}",
+                    .{ organization, product, sku },
+                );
             try costs.append(arena, .{
-                .id = try std.fmt.allocPrint(arena, "{s}:{s}", .{ product, sku }),
+                .id = id,
+                .organization = organization,
                 .product = product,
                 .sku = sku,
                 .amount_micros = amount,
             });
         }
     }
-    result.costs = try costs.toOwnedSlice(arena);
-    std.mem.sort(ProductCost, result.costs, {}, costDescending);
-    return result;
 }
 
 fn optionalString(value: ?std.json.Value) ?[]const u8 {
@@ -175,4 +220,32 @@ test "GitHub aggregates enhanced billing usage by product and SKU" {
     defer report.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(i64, 3_500_000), report.summary.current_cost_micros);
     try std.testing.expectEqual(@as(usize, 2), report.line_items.len);
+}
+
+test "GitHub keeps organization costs separate while aggregating selected organizations" {
+    var provider = GitHub.init();
+    defer provider.deinit();
+    try provider.ingestOrganizations(std.testing.allocator, &.{
+        .{
+            .organization = "alpha",
+            .payload =
+            \\{"usageItems":[{"product":"Actions","sku":"Linux","netAmount":1.25}]}
+            ,
+        },
+        .{
+            .organization = "beta",
+            .payload =
+            \\{"usageItems":[{"product":"Actions","sku":"Linux","netAmount":2.75}]}
+            ,
+        },
+    }, 100);
+    const report = try provider.collect(std.testing.allocator, .{
+        .start_unix = 1,
+        .end_exclusive_unix = 200,
+    });
+    defer report.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(i64, 4_000_000), report.summary.current_cost_micros);
+    try std.testing.expectEqual(@as(usize, 2), report.line_items.len);
+    try std.testing.expectEqualStrings("beta", report.line_items[0].detail.?);
+    try std.testing.expectEqualStrings("alpha", report.line_items[1].detail.?);
 }

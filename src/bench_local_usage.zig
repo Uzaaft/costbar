@@ -58,6 +58,8 @@ pub fn main(init: std.process.Init) !void {
             .track_claude = @intFromBool(is_claude),
             .track_opencode = 0,
             .use_github_cli = 0,
+            .has_source_filter = 0,
+            .source_ids = .{},
         }, &result);
         defer costbar_bytes_free(result.errors);
         if (status != .ok) return error.RefreshFailed;

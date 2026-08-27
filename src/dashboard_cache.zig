@@ -1,8 +1,8 @@
 const std = @import("std");
 const model = @import("model.zig");
 
-const cache_version: u32 = 1;
-const cache_name = "dashboard-v1.json";
+const cache_version: u32 = 3;
+const cache_name = "dashboard-v3.json";
 const max_cache_bytes = 64 * 1024 * 1024;
 
 const Document = struct {
@@ -44,6 +44,62 @@ pub fn saveDefault(
         &.{ home, "Library/Caches/Costbar" },
     );
     defer allocator.free(directory);
+    try savePreservingCostOverview(allocator, io, directory, dashboard);
+}
+
+pub fn loadAccount(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    home: []const u8,
+    account_id: []const u8,
+    period: model.Period,
+) !?Loaded {
+    const directory = try std.fs.path.join(
+        allocator,
+        &.{ home, "Library/Caches/Costbar/accounts", account_id },
+    );
+    defer allocator.free(directory);
+    return load(allocator, io, directory, period);
+}
+
+pub fn saveAccount(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    home: []const u8,
+    account_id: []const u8,
+    dashboard: model.Dashboard,
+) !void {
+    const directory = try std.fs.path.join(
+        allocator,
+        &.{ home, "Library/Caches/Costbar/accounts", account_id },
+    );
+    defer allocator.free(directory);
+    try savePreservingCostOverview(allocator, io, directory, dashboard);
+}
+
+/// A refresh that contains only local token usage must not erase a previously
+/// cached monetary overview. This also protects the last useful snapshot from
+/// transient Keychain or provider-configuration failures.
+fn savePreservingCostOverview(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    directory: []const u8,
+    dashboard: model.Dashboard,
+) !void {
+    try validate(dashboard);
+    if (dashboard.totals.len == 0) {
+        const maybe_existing = load(
+            allocator,
+            io,
+            directory,
+            dashboard.period,
+        ) catch null;
+        if (maybe_existing) |existing_value| {
+            var existing = existing_value;
+            defer existing.deinit();
+            if (existing.dashboard.totals.len > 0) return;
+        }
+    }
     try save(allocator, io, directory, dashboard);
 }
 
@@ -138,6 +194,8 @@ fn validate(dashboard: model.Dashboard) !void {
             report.line_items.len > 1_000_000 or
             report.allowance_windows.len > 1_000_000 or
             report.token_usage_windows.len > 1_000_000 or
+            report.token_usage_series.len > 1_000_000 or
+            report.spend_series.len > 1_000_000 or
             report.financials.len > 1_000_000)
         {
             return error.InvalidDashboardCache;
@@ -173,6 +231,21 @@ fn validate(dashboard: model.Dashboard) !void {
             try validateString(window.id);
             try validateString(window.label);
         }
+        for (report.token_usage_series) |series| {
+            try series.period.validate();
+            try validateString(series.id);
+            try validateString(series.label);
+            if (series.buckets.len > 1_000_000) return error.InvalidDashboardCache;
+            for (series.buckets) |bucket| try bucket.period.validate();
+        }
+        for (report.spend_series) |series| {
+            try series.period.validate();
+            try validateString(series.id);
+            try validateString(series.label);
+            try validateString(series.currency);
+            if (series.buckets.len > 1_000_000) return error.InvalidDashboardCache;
+            for (series.buckets) |bucket| try bucket.period.validate();
+        }
         for (report.financials) |financial| try validateString(financial.currency);
     }
 }
@@ -202,6 +275,17 @@ test "dashboard cache round trips a normalized snapshot and rejects another mont
         .service = "Droplets",
         .amount_micros = 2_500_000,
     }};
+    var spend_buckets = [_]model.SpendBucket{.{
+        .period = .{ .start_unix = 1, .end_exclusive_unix = 200 },
+        .amount_micros = 2_500_000,
+    }};
+    var spend_series = [_]model.SpendSeries{.{
+        .id = "daily",
+        .label = "Daily usage",
+        .currency = "USD",
+        .period = .{ .start_unix = 1, .end_exclusive_unix = 200 },
+        .buckets = &spend_buckets,
+    }};
     var providers = [_]model.ProviderReport{.{
         .summary = .{
             .id = "digitalocean",
@@ -213,6 +297,7 @@ test "dashboard cache round trips a normalized snapshot and rejects another mont
         },
         .resources = &resources,
         .line_items = &line_items,
+        .spend_series = &spend_series,
     }};
     var totals = [_]model.CurrencyTotal{.{
         .currency = "USD",
@@ -239,6 +324,10 @@ test "dashboard cache round trips a normalized snapshot and rejects another mont
     defer loaded.deinit();
     try std.testing.expectEqual(@as(i64, 2_500_000), loaded.dashboard.totals[0].current_cost_micros);
     try std.testing.expectEqualStrings("Production", loaded.dashboard.providers[0].resources[0].name);
+    try std.testing.expectEqual(
+        @as(i64, 2_500_000),
+        loaded.dashboard.providers[0].spend_series[0].buckets[0].amount_micros,
+    );
     try std.testing.expect((try load(
         std.testing.allocator,
         std.testing.io,
@@ -266,4 +355,51 @@ test "dashboard cache ignores corrupt data" {
             .{ .start_unix = 1, .end_exclusive_unix = 2 },
         ),
     );
+}
+
+test "token-only refresh does not overwrite a cached cost overview" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var directory_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const directory_length = try tmp.dir.realPath(std.testing.io, &directory_buffer);
+    const directory = directory_buffer[0..directory_length];
+    const period = model.Period{ .start_unix = 1, .end_exclusive_unix = 200 };
+    var totals = [_]model.CurrencyTotal{.{
+        .currency = "USD",
+        .current_cost_micros = 423_000_000,
+        .projected_cost_micros = null,
+        .credit_remaining_micros = null,
+        .projection_complete = false,
+        .credit_complete = false,
+    }};
+    const cost_dashboard = model.Dashboard{
+        .period = period,
+        .generated_at_unix = 100,
+        .totals = &totals,
+        .providers = &.{},
+    };
+    try save(std.testing.allocator, std.testing.io, directory, cost_dashboard);
+
+    const token_only_dashboard = model.Dashboard{
+        .period = period,
+        .generated_at_unix = 200,
+        .totals = &.{},
+        .providers = &.{},
+    };
+    try savePreservingCostOverview(
+        std.testing.allocator,
+        std.testing.io,
+        directory,
+        token_only_dashboard,
+    );
+
+    var loaded = (try load(
+        std.testing.allocator,
+        std.testing.io,
+        directory,
+        period,
+    )).?;
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(i64, 100), loaded.dashboard.generated_at_unix);
+    try std.testing.expectEqual(@as(i64, 423_000_000), loaded.dashboard.totals[0].current_cost_micros);
 }

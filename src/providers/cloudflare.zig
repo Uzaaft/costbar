@@ -52,6 +52,24 @@ pub const Service = struct {
     zone_id: ?[]const u8 = null,
 };
 
+/// One usage-priced Cloudflare SKU for the current billing period. The
+/// billable-usage API returns one row per charge period, so parsing keeps only
+/// the newest cumulative values for each SKU/subscription/zone combination.
+const BillableUsageItem = struct {
+    id: []const u8,
+    name: []const u8,
+    service_name: []const u8,
+    family: []const u8,
+    detail: []const u8,
+    amount_micros: i64,
+    subscription_id: ?[]const u8,
+    zone_id: ?[]const u8,
+    zone_name: ?[]const u8,
+    charge_period_end: []const u8,
+    cumulative_quantity: []const u8,
+    pricing_unit: []const u8,
+};
+
 /// One parsed API document together with the arena holding its strings.
 const Document = struct {
     arena: std.heap.ArenaAllocator,
@@ -64,11 +82,25 @@ const Document = struct {
     }
 };
 
+const BillableUsageDocument = struct {
+    arena: std.heap.ArenaAllocator,
+    items: []const BillableUsageItem,
+    currency: ?[]const u8,
+    updated_at_unix: i64,
+
+    fn deinit(self: *BillableUsageDocument) void {
+        self.arena.deinit();
+    }
+};
+
 pub const Cloudflare = struct {
     /// Account-level subscriptions: Workers Paid, R2, Images, Access, …
     subscriptions: ?Document = null,
     /// Per-zone plan tiers, which the account subscriptions feed omits.
     zone_plans: ?Document = null,
+    /// Metered product usage and invoice-facing overage cost for the current
+    /// Cloudflare billing period.
+    billable_usage: ?BillableUsageDocument = null,
 
     pub fn init() Cloudflare {
         return .{};
@@ -77,8 +109,10 @@ pub const Cloudflare = struct {
     pub fn deinit(self: *Cloudflare) void {
         if (self.subscriptions) |*document| document.deinit();
         if (self.zone_plans) |*document| document.deinit();
+        if (self.billable_usage) |*document| document.deinit();
         self.subscriptions = null;
         self.zone_plans = null;
+        self.billable_usage = null;
     }
 
     pub fn metadata(_: *const Cloudflare) model.ProviderMetadata {
@@ -89,9 +123,10 @@ pub const Cloudflare = struct {
         };
     }
 
-    /// Fetches the account's live subscriptions and zone plans through the
-    /// compile-time HTTP interface. The zone feed is best effort: a token
-    /// without Zone Read still produces a report from the subscriptions alone.
+    /// Fetches the account's live subscriptions, billable usage, and zone plans
+    /// through the compile-time HTTP interface. The usage and zone feeds are
+    /// best effort: usage is available only to supported PayGo accounts and a
+    /// token without Zone Read still produces an account-level report.
     pub fn fetch(
         self: *Cloudflare,
         allocator: std.mem.Allocator,
@@ -119,6 +154,27 @@ pub const Cloudflare = struct {
         };
         errdefer replacement_subscriptions.deinit();
 
+        var replacement_usage: ?BillableUsageDocument = usage: {
+            const usage_url = try std.fmt.allocPrint(
+                allocator,
+                api_prefix ++ "accounts/{s}/billable-usage",
+                .{credentials.account_id},
+            );
+            defer allocator.free(usage_url);
+            const response = client.get(allocator, .{
+                .url = usage_url,
+                .bearer_token = credentials.token,
+            }) catch break :usage null;
+            defer response.deinit(allocator);
+            response.requireSuccess() catch break :usage null;
+            break :usage try parseBillableUsage(
+                allocator,
+                response.body,
+                received_at_unix,
+            );
+        };
+        errdefer if (replacement_usage) |*document| document.deinit();
+
         var replacement_zones: ?Document = fetchAllZones(
             allocator,
             client,
@@ -128,6 +184,7 @@ pub const Cloudflare = struct {
         errdefer if (replacement_zones) |*document| document.deinit();
 
         replace(&self.subscriptions, replacement_subscriptions);
+        if (replacement_usage) |document| replaceBillableUsage(&self.billable_usage, document);
         if (replacement_zones) |document| replace(&self.zone_plans, document);
     }
 
@@ -152,10 +209,25 @@ pub const Cloudflare = struct {
             );
             return;
         }
+        if (std.mem.eql(u8, document_id, "billable-usage")) {
+            replaceBillableUsage(
+                &self.billable_usage,
+                try parseBillableUsage(allocator, payload, received_at_unix),
+            );
+            return;
+        }
         return error.UnsupportedDocument;
     }
 
     fn replace(slot: *?Document, replacement: Document) void {
+        if (slot.*) |*existing| existing.deinit();
+        slot.* = replacement;
+    }
+
+    fn replaceBillableUsage(
+        slot: *?BillableUsageDocument,
+        replacement: BillableUsageDocument,
+    ) void {
         if (slot.*) |*existing| existing.deinit();
         slot.* = replacement;
     }
@@ -165,16 +237,20 @@ pub const Cloudflare = struct {
         allocator: std.mem.Allocator,
         _: model.Period,
     ) !model.ProviderReport {
-        if (self.subscriptions == null and self.zone_plans == null) {
+        if (self.subscriptions == null and
+            self.zone_plans == null and
+            self.billable_usage == null)
+        {
             return error.NotFetched;
         }
 
         const merged = try self.mergedServices(allocator);
         defer allocator.free(merged);
+        const usage_items = if (self.billable_usage) |document| document.items else &.{};
 
-        const resources = try allocator.alloc(model.Resource, merged.len);
+        const resources = try allocator.alloc(model.Resource, merged.len + usage_items.len);
         errdefer allocator.free(resources);
-        const line_items = try allocator.alloc(model.CostLineItem, merged.len);
+        const line_items = try allocator.alloc(model.CostLineItem, merged.len + usage_items.len);
         errdefer allocator.free(line_items);
 
         var total_micros: i64 = 0;
@@ -195,18 +271,39 @@ pub const Cloudflare = struct {
                 .detail = service.usage_label,
             };
         }
+        for (usage_items, merged.len..) |item, index| {
+            total_micros = std.math.add(i64, total_micros, item.amount_micros) catch
+                return error.AmountOverflow;
+            resources[index] = .{
+                .id = item.id,
+                .name = item.name,
+                .kind = "billable usage",
+                .status = .active,
+            };
+            line_items[index] = .{
+                .id = item.id,
+                .description = item.name,
+                .service = item.family,
+                .amount_micros = item.amount_micros,
+                .detail = item.detail,
+            };
+        }
 
         return .{
             .summary = .{
                 .id = "cloudflare",
                 .display_name = "Cloudflare",
                 .kind = .cloud,
-                .currency = self.currency(),
-                // Cloudflare bills subscriptions at the start of each period,
-                // so the recurring amount is both spent and projected. Metered
-                // usage above plan allowances is not in either feed.
+                .currency = try self.currency(),
+                // Subscription prices and billable usage costs come from
+                // disjoint Cloudflare feeds: the usage endpoint contains
+                // overages only, not fixed recurring plan charges.
                 .current_cost_micros = total_micros,
-                .projected_cost_micros = total_micros,
+                // Cloudflare does not forecast future metered usage.
+                .projected_cost_micros = if (usage_items.len == 0)
+                    total_micros
+                else
+                    null,
                 .updated_at_unix = self.updatedAtUnix(),
             },
             .resources = resources,
@@ -248,20 +345,37 @@ pub const Cloudflare = struct {
         return merged;
     }
 
-    fn currency(self: *const Cloudflare) []const u8 {
+    fn currency(self: *const Cloudflare) ![]const u8 {
+        var found: ?[]const u8 = null;
         if (self.subscriptions) |document| {
-            if (document.currency) |code| return code;
+            if (document.currency) |code| found = code;
         }
         if (self.zone_plans) |document| {
-            if (document.currency) |code| return code;
+            if (document.currency) |code| {
+                if (found) |existing| {
+                    if (!std.mem.eql(u8, existing, code)) return error.MixedCurrencies;
+                } else {
+                    found = code;
+                }
+            }
         }
-        return "USD";
+        if (self.billable_usage) |document| {
+            if (document.currency) |code| {
+                if (found) |existing| {
+                    if (!std.mem.eql(u8, existing, code)) return error.MixedCurrencies;
+                } else {
+                    found = code;
+                }
+            }
+        }
+        return found orelse "USD";
     }
 
     fn updatedAtUnix(self: *const Cloudflare) i64 {
         var newest: i64 = std.math.minInt(i64);
         if (self.subscriptions) |document| newest = @max(newest, document.updated_at_unix);
         if (self.zone_plans) |document| newest = @max(newest, document.updated_at_unix);
+        if (self.billable_usage) |document| newest = @max(newest, document.updated_at_unix);
         return newest;
     }
 };
@@ -501,6 +615,165 @@ fn parseZones(
     return document;
 }
 
+/// `GET /accounts/{id}/billable-usage`
+fn parseBillableUsage(
+    allocator: std.mem.Allocator,
+    payload: []const u8,
+    received_at_unix: i64,
+) !BillableUsageDocument {
+    var document = BillableUsageDocument{
+        .arena = .init(allocator),
+        .items = &.{},
+        .currency = null,
+        .updated_at_unix = received_at_unix,
+    };
+    errdefer document.deinit();
+    const arena = document.arena.allocator();
+
+    const results = try parseResultArray(arena, payload);
+    var items: std.ArrayList(BillableUsageItem) = .empty;
+    for (results) |usage_value| {
+        const usage = try requireObject(usage_value);
+        const service_name = optionalString(usage, "ServiceName") orelse
+            return error.InvalidResponse;
+        const family = optionalString(usage, "ServiceFamilyName") orelse
+            "Billable usage";
+        const subscription_id = optionalString(usage, "SubscriptionId");
+        const zone_id = optionalString(usage, "ZoneId");
+        const zone_name = optionalString(usage, "ZoneName");
+        const charge_period_end = optionalString(usage, "ChargePeriodEnd") orelse
+            return error.InvalidResponse;
+        const pricing_unit = optionalString(usage, "PricingUnit") orelse
+            optionalString(usage, "ConsumedUnit") orelse "units";
+        const cumulative_quantity = try numberText(
+            arena,
+            usage.get("CumulatedPricingQuantity") orelse return error.InvalidResponse,
+        );
+        const amount_micros = try parseRoundedMoneyValue(
+            usage.get("CumulatedContractedCost") orelse return error.InvalidResponse,
+        );
+        const billing_currency = optionalString(usage, "BillingCurrency") orelse
+            return error.InvalidResponse;
+        if (billing_currency.len != 3) return error.InvalidCurrency;
+        if (document.currency) |existing| {
+            if (!std.mem.eql(u8, existing, billing_currency)) {
+                return error.MixedCurrencies;
+            }
+        } else {
+            document.currency = billing_currency;
+        }
+
+        if (findUsageItem(
+            items.items,
+            service_name,
+            family,
+            subscription_id,
+            zone_id,
+            zone_name,
+            pricing_unit,
+        )) |index| {
+            // ISO 8601 timestamps sort chronologically because Cloudflare emits
+            // the canonical UTC representation documented by this endpoint.
+            if (std.mem.order(u8, items.items[index].charge_period_end, charge_period_end) == .gt) {
+                continue;
+            }
+            items.items[index].amount_micros = amount_micros;
+            items.items[index].charge_period_end = charge_period_end;
+            items.items[index].cumulative_quantity = cumulative_quantity;
+            items.items[index].pricing_unit = pricing_unit;
+            items.items[index].zone_name = zone_name;
+            items.items[index].name = if (zone_name) |name|
+                try std.fmt.allocPrint(arena, "{s} · {s}", .{ name, service_name })
+            else
+                service_name;
+            continue;
+        }
+
+        const name = if (zone_name) |name|
+            try std.fmt.allocPrint(arena, "{s} · {s}", .{ name, service_name })
+        else
+            service_name;
+        try items.append(arena, .{
+            .id = try std.fmt.allocPrint(arena, "usage:{s}:{s}:{s}:{s}:{s}", .{
+                family,
+                service_name,
+                subscription_id orelse "",
+                zone_id orelse zone_name orelse "",
+                pricing_unit,
+            }),
+            .name = name,
+            .service_name = service_name,
+            .family = family,
+            .detail = "",
+            .amount_micros = amount_micros,
+            .subscription_id = subscription_id,
+            .zone_id = zone_id,
+            .zone_name = zone_name,
+            .charge_period_end = charge_period_end,
+            .cumulative_quantity = cumulative_quantity,
+            .pricing_unit = pricing_unit,
+        });
+    }
+
+    for (items.items) |*item| {
+        item.detail = try std.fmt.allocPrint(arena, "{s} {s} · billable usage", .{
+            item.cumulative_quantity,
+            item.pricing_unit,
+        });
+    }
+    std.mem.sort(BillableUsageItem, items.items, {}, moreExpensiveUsageFirst);
+    document.items = try items.toOwnedSlice(arena);
+    return document;
+}
+
+fn findUsageItem(
+    items: []const BillableUsageItem,
+    service_name: []const u8,
+    family: []const u8,
+    subscription_id: ?[]const u8,
+    zone_id: ?[]const u8,
+    zone_name: ?[]const u8,
+    pricing_unit: []const u8,
+) ?usize {
+    for (items, 0..) |item, index| {
+        if (!std.mem.eql(u8, item.service_name, service_name)) continue;
+        if (!std.mem.eql(u8, item.family, family)) continue;
+        if (!optionalStringsEqual(item.subscription_id, subscription_id)) continue;
+        if (!sameUsageLocation(item.zone_id, item.zone_name, zone_id, zone_name)) continue;
+        if (!std.mem.eql(u8, item.pricing_unit, pricing_unit)) continue;
+        return index;
+    }
+    return null;
+}
+
+fn optionalStringsEqual(left: ?[]const u8, right: ?[]const u8) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?, right.?);
+}
+
+fn sameUsageLocation(
+    left_id: ?[]const u8,
+    left_name: ?[]const u8,
+    right_id: ?[]const u8,
+    right_name: ?[]const u8,
+) bool {
+    if (left_id != null or right_id != null) {
+        return optionalStringsEqual(left_id, right_id);
+    }
+    return optionalStringsEqual(left_name, right_name);
+}
+
+fn moreExpensiveUsageFirst(
+    _: void,
+    left: BillableUsageItem,
+    right: BillableUsageItem,
+) bool {
+    if (left.amount_micros != right.amount_micros) {
+        return left.amount_micros > right.amount_micros;
+    }
+    return std.mem.lessThan(u8, left.name, right.name);
+}
+
 fn parseResultArray(
     arena: std.mem.Allocator,
     payload: []const u8,
@@ -598,6 +871,29 @@ fn parseMoneyValue(value: std.json.Value) !i64 {
             error.AmountOverflow,
         else => error.InvalidAmount,
     };
+}
+
+fn parseRoundedMoneyValue(value: std.json.Value) !i64 {
+    return switch (value) {
+        .number_string => |number| money.parseRoundedMicros(number),
+        .string => |number| money.parseRoundedMicros(number),
+        .integer => |integer| std.math.mul(i64, integer, money.micros_per_unit) catch
+            error.AmountOverflow,
+        else => error.InvalidAmount,
+    };
+}
+
+fn numberText(arena: std.mem.Allocator, value: std.json.Value) ![]const u8 {
+    const result = switch (value) {
+        .number_string => |number| number,
+        .string => |number| number,
+        .integer => |integer| return std.fmt.allocPrint(arena, "{d}", .{integer}),
+        .float => |number| return std.fmt.allocPrint(arena, "{d}", .{number}),
+        else => return error.InvalidQuantity,
+    };
+    const parsed = std.fmt.parseFloat(f128, result) catch return error.InvalidQuantity;
+    if (!std.math.isFinite(parsed)) return error.InvalidQuantity;
+    return result;
 }
 
 test "Cloudflare reports account subscriptions with their plan names" {
@@ -705,7 +1001,44 @@ test "Cloudflare ignores a currency mismatch on unpriced plans" {
     try std.testing.expectEqualStrings("USD", report.summary.currency);
 }
 
-test "Cloudflare fetches subscriptions and zone plans through comptime client" {
+test "Cloudflare includes every metered SKU at its billing-period cumulative cost" {
+    var provider = Cloudflare.init();
+    defer provider.deinit();
+
+    try provider.ingest(std.testing.allocator, "subscriptions",
+        \\{"success":true,"result":[{"id":"workers","currency":"USD","frequency":"monthly","price":5,"rate_plan":{"public_name":"Workers Paid"},"state":"Paid"}]}
+    , 1_000);
+    try provider.ingest(std.testing.allocator, "billable-usage",
+        \\{"success":true,"result":[
+        \\  {"BillingCurrency":"USD","ChargePeriodEnd":"2026-08-02T00:00:00Z","ServiceName":"Container Memory","ServiceFamilyName":"Containers","ContractedCost":0.04,"CumulatedContractedCost":0.04,"PricingQuantity":16000,"CumulatedPricingQuantity":16000,"PricingUnit":"GiB-seconds"},
+        \\  {"BillingCurrency":"USD","ChargePeriodEnd":"2026-08-03T00:00:00Z","ServiceName":"Container Memory","ServiceFamilyName":"Containers","ContractedCost":0.06,"CumulatedContractedCost":0.10,"PricingQuantity":24000,"CumulatedPricingQuantity":40000,"PricingUnit":"GiB-seconds"},
+        \\  {"BillingCurrency":"USD","ChargePeriodEnd":"2026-08-03T00:00:00Z","ServiceName":"PlanetScale Storage","ServiceFamilyName":"PlanetScale","ContractedCost":0.03,"CumulatedContractedCost":0.03,"PricingQuantity":2,"CumulatedPricingQuantity":2,"PricingUnit":"GiB-months"},
+        \\  {"BillingCurrency":"USD","ChargePeriodEnd":"2026-08-03T00:00:00Z","ServiceName":"Workers Requests","ServiceFamilyName":"Workers","ContractedCost":0,"CumulatedContractedCost":0,"PricingQuantity":900000,"CumulatedPricingQuantity":900000,"PricingUnit":"Requests"}
+        \\]}
+    , 2_000);
+
+    const report = try provider.collect(std.testing.allocator, .{
+        .start_unix = 1,
+        .end_exclusive_unix = 2,
+    });
+    defer report.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(i64, 5_130_000), report.summary.current_cost_micros);
+    try std.testing.expectEqual(@as(?i64, null), report.summary.projected_cost_micros);
+    try std.testing.expectEqual(@as(usize, 4), report.line_items.len);
+    try std.testing.expectEqualStrings("Container Memory", report.line_items[1].description);
+    try std.testing.expectEqualStrings("Containers", report.line_items[1].service);
+    try std.testing.expectEqual(@as(i64, 100_000), report.line_items[1].amount_micros);
+    try std.testing.expectEqualStrings(
+        "40000 GiB-seconds · billable usage",
+        report.line_items[1].detail.?,
+    );
+    try std.testing.expectEqualStrings("PlanetScale Storage", report.line_items[2].description);
+    try std.testing.expectEqualStrings("Workers Requests", report.line_items[3].description);
+    try std.testing.expectEqual(@as(i64, 0), report.line_items[3].amount_micros);
+}
+
+test "Cloudflare fetches subscriptions billable usage and zone plans through comptime client" {
     const Backend = struct {
         const Step = struct {
             url: []const u8,
@@ -741,6 +1074,12 @@ test "Cloudflare fetches subscriptions and zone plans through comptime client" {
             ,
         },
         .{
+            .url = api_prefix ++ "accounts/" ++ account_id ++ "/billable-usage",
+            .body =
+            \\{"success":true,"result":[]}
+            ,
+        },
+        .{
             .url = api_prefix ++ "zones?account.id=" ++ account_id ++ "&per_page=50&page=1",
             .body =
             \\{"success":true,"result":[{"id":"zone-a","name":"example.com","status":"active","plan":{"name":"Pro Website","price":20,"currency":"USD","frequency":"monthly","is_subscribed":true}}]}
@@ -770,7 +1109,7 @@ test "Cloudflare fetches subscriptions and zone plans through comptime client" {
     try std.testing.expectEqualStrings("example.com · Pro Website", report.resources[0].name);
 }
 
-test "Cloudflare still reports subscriptions when the zone feed is forbidden" {
+test "Cloudflare still reports subscriptions when optional feeds are forbidden" {
     const Backend = struct {
         calls: usize = 0,
 
@@ -780,7 +1119,9 @@ test "Cloudflare still reports subscriptions when the zone feed is forbidden" {
             request: http.Request,
         ) !http.Response {
             self.calls += 1;
-            if (std.mem.indexOf(u8, request.url, "/zones") != null) {
+            if (std.mem.indexOf(u8, request.url, "/zones") != null or
+                std.mem.indexOf(u8, request.url, "/billable-usage") != null)
+            {
                 return .{ .status = 403, .body = try allocator.dupe(u8, "{}") };
             }
             return .{
@@ -812,7 +1153,7 @@ test "Cloudflare still reports subscriptions when the zone feed is forbidden" {
     });
     defer report.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(usize, 2), backend.calls);
+    try std.testing.expectEqual(@as(usize, 3), backend.calls);
     try std.testing.expectEqual(@as(i64, 5_000_000), report.summary.current_cost_micros);
 }
 
@@ -827,12 +1168,13 @@ test "Cloudflare follows every zone result page" {
         ) !http.Response {
             const body = switch (self.calls) {
                 0 => "{\"success\":true,\"result\":[]}",
-                1 => "{\"success\":true,\"result\":[{\"id\":\"zone-a\",\"name\":\"a.test\",\"status\":\"active\",\"plan\":{\"name\":\"Pro\",\"price\":20,\"currency\":\"USD\",\"frequency\":\"monthly\",\"is_subscribed\":true}}],\"result_info\":{\"page\":1,\"total_pages\":2}}",
-                2 => "{\"success\":true,\"result\":[{\"id\":\"zone-b\",\"name\":\"b.test\",\"status\":\"active\",\"plan\":{\"name\":\"Business\",\"price\":25,\"currency\":\"USD\",\"frequency\":\"monthly\",\"is_subscribed\":true}}],\"result_info\":{\"page\":2,\"total_pages\":2}}",
+                1 => "{\"success\":true,\"result\":[]}",
+                2 => "{\"success\":true,\"result\":[{\"id\":\"zone-a\",\"name\":\"a.test\",\"status\":\"active\",\"plan\":{\"name\":\"Pro\",\"price\":20,\"currency\":\"USD\",\"frequency\":\"monthly\",\"is_subscribed\":true}}],\"result_info\":{\"page\":1,\"total_pages\":2}}",
+                3 => "{\"success\":true,\"result\":[{\"id\":\"zone-b\",\"name\":\"b.test\",\"status\":\"active\",\"plan\":{\"name\":\"Business\",\"price\":25,\"currency\":\"USD\",\"frequency\":\"monthly\",\"is_subscribed\":true}}],\"result_info\":{\"page\":2,\"total_pages\":2}}",
                 else => return error.UnexpectedRequest,
             };
-            if (self.calls > 0) {
-                const suffix = if (self.calls == 1) "&page=1" else "&page=2";
+            if (self.calls > 1) {
+                const suffix = if (self.calls == 2) "&page=1" else "&page=2";
                 try std.testing.expect(std.mem.endsWith(u8, request.url, suffix));
             }
             self.calls += 1;
@@ -857,7 +1199,7 @@ test "Cloudflare follows every zone result page" {
         .end_exclusive_unix = 200,
     });
     defer report.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 3), backend.calls);
+    try std.testing.expectEqual(@as(usize, 4), backend.calls);
     try std.testing.expectEqual(@as(usize, 2), report.resources.len);
     try std.testing.expectEqual(@as(i64, 45_000_000), report.summary.current_cost_micros);
 }

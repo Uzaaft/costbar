@@ -71,7 +71,6 @@ enum ProviderTint {
   static func color(for id: String) -> Color {
     switch id {
     case "digitalocean": Color(red: 0.22, green: 0.49, blue: 0.96)
-    case "ovh": Color(red: 0.20, green: 0.34, blue: 0.68)
     case "hetzner": Color(red: 0.88, green: 0.16, blue: 0.22)
     case "cloudflare": Color(red: 0.95, green: 0.49, blue: 0.20)
     case "runpod": Color(red: 0.40, green: 0.78, blue: 0.55)

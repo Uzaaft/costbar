@@ -101,10 +101,9 @@ It reports credential lookup, every HTTP request with status and size, each
 provider's transport time against its parse time, the slowest requests, the
 concurrent refresh the app actually performs against the critical path that
 bounds it, and the CPU cost of aggregation and snapshot encoding. Tokens come
-from the environment first (`DIGITALOCEAN_TOKEN`, `OVH_ENDPOINT`,
-`OVH_APPLICATION_KEY`, `OVH_APPLICATION_SECRET`, `OVH_CONSUMER_KEY`,
-`OVH_CLOUD_PROJECT_SERVICE`, `HCLOUD_TOKEN`, `CLOUDFLARE_TOKEN`,
-`CLOUDFLARE_ACCOUNT_ID`, `RUNPOD_API_KEY`, `VERCEL_TOKEN`, `VERCEL_TEAM`,
+from the environment first (`DIGITALOCEAN_TOKEN`, `HCLOUD_TOKEN`,
+`CLOUDFLARE_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `RUNPOD_API_KEY`, `VERCEL_TOKEN`,
+`VERCEL_TEAM`,
 `OPENROUTER_API_KEY`, `OPENROUTER_MANAGEMENT_KEY`, `OPENAI_ADMIN_KEY`,
 `ANTHROPIC_ADMIN_KEY`, `XAI_MANAGEMENT_API_KEY`, `XAI_TEAM_ID`, `GITHUB_TOKEN`,
 `GITHUB_ORGANIZATION`, `CURSOR_ADMIN_KEY`) and otherwise from the app's
@@ -147,11 +146,13 @@ items and are copied into Zig-owned memory for requests.
 Without credentials, providers report unavailable and no total is invented.
 Open the gear menu to save provider credentials and refresh live data:
 
+Each provider owns an ordered account list with one active account. Add
+personal, team, project, or organization credentials under that provider;
+Costbar runs the same provider integration with each account's credential
+override. Accounts keep independent Keychain namespaces and dashboard
+identities while their costs participate in the same per-currency totals.
+
 - DigitalOcean: a token with `billing:read` and `droplet:read`.
-- OVHcloud Public Cloud: an API endpoint (`ovh-eu`, `ovh-ca`, or `ovh-us`),
-  application key and secret, consumer key, and Public Cloud project ID. The
-  credential needs GET access to `/cloud/project/{project}/usage/current` and
-  `/cloud/project/{project}/usage/forecast`.
 - Hetzner Cloud: a read-capable project API token. Hetzner tokens are scoped to
   one project, so configure the project whose resources should be estimated.
 - Cloudflare: the 32-character account ID and a token with Billing Read, plus
@@ -160,7 +161,7 @@ Open the gear menu to save provider credentials and refresh live data:
 - Vercel: an access token and optional team ID or slug. The billing export is
   available to Pro and Enterprise teams.
 - OpenRouter: an API key for spend and limits. An optional management key adds
-  account credits and model-level activity.
+  account credits, model-level activity, and daily spend history.
 - OpenAI API: an organization owner Admin API key. This is separate from a
   ChatGPT or Codex subscription and reads the organization Costs and
   Completions Usage APIs.
@@ -169,11 +170,12 @@ Open the gear menu to save provider credentials and refresh live data:
 - xAI (Grok) API: a team ID and Management API key. This reads historical API
   spend by model and the team's prepaid credit balance. SuperGrok consumer
   subscription quota is separate and has no public API.
-- GitHub: an organization name and either a saved token or an explicitly
-  selected signed-in GitHub CLI session. The selected identity needs
-  organization Administration read permission and the organization must use
-  GitHub's enhanced billing platform. In CLI mode Zig invokes `gh api`; the
-  token is never exported to Costbar.
+- GitHub: one or more organizations and either a saved token or an explicitly
+  selected signed-in GitHub CLI session. CLI mode discovers the organizations
+  visible to that identity and lets you include only the ones Costbar should
+  total. The identity needs organization Administration read permission and
+  each selected organization must use GitHub's enhanced billing platform. Zig
+  invokes `gh api`; the token is never exported to Costbar.
 - Cursor: a Team Admin API key for invoice-reconcilable usage events and model
   token totals.
 
@@ -184,9 +186,19 @@ Anthropic API billing. Enable either integration explicitly under **AI
 subscriptions and agents** in Settings. Their token and quota reports do not
 contribute a made-up dollar amount to the financial total.
 
-For Codex, Costbar scans current local session logs for model, token, and
-rate-limit counters. No API key is required, and prompt or response text is
-never retained by Costbar.
+For Codex quota, Costbar follows CodexBar's primary authentication path: it
+reads the signed-in Codex CLI OAuth access token from `~/.codex/auth.json` (or
+`$CODEX_HOME/auth.json`) and calls ChatGPT's Codex usage endpoint directly.
+Costbar never writes the auth file or redeems its refresh token. Rate limits
+embedded in local sessions remain the fallback. Model and token totals still
+come from local session logs, and prompt or response text is never retained.
+
+Codex can hold more than one account. **Add Account** runs `codex login`
+against an isolated Costbar-managed `CODEX_HOME`, so each account keeps its own
+OAuth profile beside the system login; the CLI still owns the OAuth flow.
+**Active** picks which account the dashboard follows, and **System** promotes a
+managed account to this Mac's default Codex login, preserving the account it
+replaces.
 
 For Claude, Costbar scans local Claude Code session logs for token counters.
 Claude exposes subscriber rate limits to status-line commands after a response,
@@ -196,11 +208,13 @@ existing status-line command. **Restore previous Claude status line** removes
 the bridge and restores the backed-up setting.
 
 OpenCode is opt-in under the same section. Zig invokes the official
-`opencode db --format json` interface with a period-bounded aggregate query
-that selects only provider, model, cost, and token fields. Prompt, response,
-tool, and file content are not queried. OpenCode's recorded model cost is
-informational and excluded from the combined financial total because it can
-overlap an API provider's bill or represent usage included in OpenCode Go.
+`opencode db --format json` interface with one period-bounded, time-bucketed
+aggregate query. Zig folds that result into model totals and the token-history
+graph; Swift only renders it. The query selects only provider, model, cost,
+timestamp, and token fields. Prompt, response, tool, and file content are not
+queried. OpenCode's recorded model cost is informational and excluded from the
+combined financial total because it can overlap an API provider's bill or
+represent usage included in OpenCode Go.
 
 The CLI costs roughly 400 ms of process start-up before it opens anything, so
 its answer is cached under `~/Library/Caches/Costbar/local-usage/opencode-v1/`
@@ -219,7 +233,7 @@ reparsed after Costbar restarts. Entries are invalidated by source size and
 modification time. They contain only timestamps, token classes, model names,
 quota data, and hashed source/deduplication identities—never source paths,
 prompts, or responses. The Zig core also stores the last normalized dashboard
-at `~/Library/Caches/Costbar/dashboard-v1.json`. On launch, the UI renders that
+at `~/Library/Caches/Costbar/dashboard-v3.json`. On launch, the UI renders that
 snapshot immediately, refreshes it asynchronously, and polls every five
 minutes. Codex session data stays under `~/.codex`; Claude session data stays
 under `~/.claude`; the Claude quota snapshot is stored at
@@ -234,10 +248,6 @@ for the total, and anything the invoice has not caught up with is shown as its
 own item rather than being hidden. Without the billing scope the breakdown
 falls back to a single honest “Account usage” item.
 
-OVHcloud uses the Public Cloud project's authoritative current-usage total and
-forecast. The breakdown is grouped from OVHcloud's hourly, monthly, and typed
-resource usage views while the root total remains authoritative.
-
 Hetzner Cloud does not expose an invoice or historical billing endpoint through
 the project API. Costbar therefore labels its figures as estimates, using the
 project's current inventory and gross, VAT-inclusive pricing. Existing servers,
@@ -247,9 +257,13 @@ are included; resources deleted earlier in the period cannot be reconstructed.
 Cloudflare quotes each subscription at its own billing cadence, so yearly and
 quarterly plans are spread across the month they are being compared in. Plan
 tiers are billed per zone and never appear in the account subscriptions feed,
-so zone plans are read separately and de-duplicated against it. Metered usage
-above plan allowances is in neither feed; the provider document model remains
-open for a future billable-usage source.
+so zone plans are read separately and de-duplicated against it. For supported
+PayGo accounts, Costbar also reads Cloudflare's current billable-usage feed and
+adds every usage-priced SKU—such as Containers memory, requests, storage, and
+third-party services—at its billing-period cumulative cost. Cloudflare
+excludes
+fixed subscription fees from that feed, so adding the two sources does not
+double-count them.
 
 Runpod combines month-to-date Pod, Serverless, and network-volume billing with
 the account's existing prepaid credit balance and current hourly burn rate.
@@ -258,8 +272,9 @@ Vercel streams the current month's FOCUS v1.3 charge export. Costbar sums
 invoice-facing billed cost, including negative credit or adjustment rows, and
 groups the breakdown by Vercel service.
 
-OpenRouter keeps its API-key limit window separate from account credit and
-reconciles any spend that has not yet appeared in model activity.
+OpenRouter keeps its API-key limit window separate from account credit,
+reconciles any spend that has not yet appeared in model activity, and charts
+dated management activity as daily UTC spend for the selected period.
 
 OpenAI and Anthropic organization reports keep cached-input, cache-creation,
 uncached-input, and output tokens distinct where their APIs expose them.
@@ -269,7 +284,8 @@ description and its separately reported prepaid-credit ledger. The management
 key is distinct from an inference API key and cannot be replaced by a
 SuperGrok login.
 
-GitHub groups enhanced-billing net amounts by product and SKU. Cursor uses each
-usage event's charged amount and usage kind, separating subscription-included,
+GitHub fetches every selected organization, keeps organization/product/SKU
+lines distinct, and totals enhanced-billing net amounts. Cursor uses each usage
+event's charged amount and usage kind, separating subscription-included,
 usage-based, and API-key activity while keeping the total reconcilable to the
 team invoice.

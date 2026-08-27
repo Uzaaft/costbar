@@ -9,7 +9,6 @@ pub const live_refresh = @import("live_refresh.zig");
 pub const claude_status = @import("claude_status.zig");
 pub const providers = struct {
     pub const digitalocean = @import("providers/digitalocean.zig");
-    pub const ovh = @import("providers/ovh.zig");
     pub const hetzner = @import("providers/hetzner.zig");
     pub const cloudflare = @import("providers/cloudflare.zig");
     pub const runpod = @import("providers/runpod.zig");
@@ -41,7 +40,6 @@ test {
     _ = live_refresh;
     _ = claude_status;
     _ = providers.digitalocean;
-    _ = providers.ovh;
     _ = providers.hetzner;
     _ = providers.cloudflare;
     _ = providers.runpod;

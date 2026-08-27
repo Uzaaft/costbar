@@ -125,6 +125,52 @@ pub const TokenUsageWindow = struct {
     }
 };
 
+/// One bucket in a token history series. Periods are explicit so consumers can
+/// label rolling windows without knowing how the provider grouped its data.
+pub const TokenUsageBucket = struct {
+    period: Period,
+    input_tokens: u64 = 0,
+    output_tokens: u64 = 0,
+    cache_read_tokens: u64 = 0,
+    cache_creation_tokens: u64 = 0,
+    reasoning_tokens: u64 = 0,
+
+    pub fn total(self: TokenUsageBucket) u64 {
+        var result = self.input_tokens;
+        result +|= self.output_tokens;
+        result +|= self.cache_read_tokens;
+        result +|= self.cache_creation_tokens;
+        result +|= self.reasoning_tokens;
+        return result;
+    }
+};
+
+/// A fixed-resolution history matching one selectable local-usage window.
+pub const TokenUsageSeries = struct {
+    id: []const u8,
+    label: []const u8,
+    period: Period,
+    buckets: []TokenUsageBucket,
+};
+
+/// One provider usage bucket in an explicit period. `amount_micros` carries
+/// billed spend while `usage_quantity` optionally carries a provider-native
+/// volume used to visualize activity that has no charge.
+pub const SpendBucket = struct {
+    period: Period,
+    amount_micros: i64,
+    usage_quantity: u64 = 0,
+};
+
+/// Provider-reported spend history at a provider-defined resolution.
+pub const SpendSeries = struct {
+    id: []const u8,
+    label: []const u8,
+    currency: []const u8,
+    period: Period,
+    buckets: []SpendBucket,
+};
+
 pub const ProviderSummary = struct {
     id: []const u8,
     display_name: []const u8,
@@ -150,6 +196,8 @@ pub const ProviderReport = struct {
     allowance_windows: []AllowanceWindow = &.{},
     token_usage: ?TokenUsage = null,
     token_usage_windows: []TokenUsageWindow = &.{},
+    token_usage_series: []TokenUsageSeries = &.{},
+    spend_series: []SpendSeries = &.{},
     /// Optional multi-currency financial values. When empty, the legacy
     /// financial fields on `summary` remain authoritative.
     financials: []FinancialSummary = &.{},
@@ -159,6 +207,14 @@ pub const ProviderReport = struct {
         allocator.free(self.line_items);
         if (self.allowance_windows.len > 0) allocator.free(self.allowance_windows);
         if (self.token_usage_windows.len > 0) allocator.free(self.token_usage_windows);
+        for (self.token_usage_series) |series| {
+            if (series.buckets.len > 0) allocator.free(series.buckets);
+        }
+        if (self.token_usage_series.len > 0) allocator.free(self.token_usage_series);
+        for (self.spend_series) |series| {
+            if (series.buckets.len > 0) allocator.free(series.buckets);
+        }
+        if (self.spend_series.len > 0) allocator.free(self.spend_series);
         if (self.financials.len > 0) allocator.free(self.financials);
     }
 };

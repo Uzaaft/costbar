@@ -283,7 +283,7 @@ private struct ProviderRow: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 7) {
       HStack(alignment: .center, spacing: 11) {
-        ProviderLogo(providerID: summary.id)
+        ProviderLogo(providerID: summary.providerTypeID)
 
         VStack(alignment: .leading, spacing: 1) {
           Text(summary.displayName)
@@ -352,15 +352,12 @@ private struct ProviderRow: View {
   }
 
   private func allowanceDetail(_ window: Dashboard.AllowanceWindow) -> String {
-    let percent = window.usedPercent.formatted(
-      .number.precision(.fractionLength(window.usedPercent.rounded() == window.usedPercent ? 0 : 1))
-    )
-    guard let reset = window.resetsAtUnix else { return "\(percent)%" }
+    guard let reset = window.resetsAtUnix else { return window.usedPercentText }
     let time = Date(timeIntervalSince1970: TimeInterval(reset)).formatted(
       date: .omitted,
       time: .shortened
     )
-    return "\(percent)% · \(time)"
+    return "\(window.usedPercentText) · \(time)"
   }
 
   private var accentColor: Color {
@@ -407,7 +404,7 @@ private struct ProviderRow: View {
         .map { "\($0.quantity) \($0.name)" }
         .joined(separator: " · ")
     }
-    if summary.id == "digitalocean" {
+    if summary.providerTypeID == "digitalocean" {
       let droplets = report.resources.filter { $0.kind == "droplet" }
       let activeDroplets = droplets.filter { $0.status == "active" }
       if activeDroplets.count != droplets.count {
@@ -418,7 +415,7 @@ private struct ProviderRow: View {
     if !report.resources.isEmpty {
       return report.resources.prefix(3).map(\.name).joined(separator: " · ")
     }
-    if summary.id == "vercel", !report.lineItems.isEmpty {
+    if summary.providerTypeID == "vercel", !report.lineItems.isEmpty {
       let count = report.lineItems.count
       return "\(count) billed \(count == 1 ? "service" : "services")"
     }
@@ -455,7 +452,7 @@ private struct BreakdownList: View {
   private func providerBreakdown(_ report: Dashboard.ProviderReport) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       HStack(spacing: 8) {
-        ProviderLogo(providerID: report.id, size: 14)
+        ProviderLogo(providerID: report.summary.providerTypeID, size: 14)
         Text(report.summary.displayName)
           .font(.system(size: 11, weight: .semibold))
           .tracking(0.8)

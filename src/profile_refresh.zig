@@ -19,7 +19,6 @@ const http = @import("http.zig");
 const model = @import("model.zig");
 const live_refresh = @import("live_refresh.zig");
 const digitalocean = @import("providers/digitalocean.zig");
-const ovh = @import("providers/ovh.zig");
 const hetzner = @import("providers/hetzner.zig");
 const cloudflare = @import("providers/cloudflare.zig");
 const runpod = @import("providers/runpod.zig");
@@ -89,11 +88,6 @@ const Setting = struct {
 /// Every credential the core accepts, in the order the report lists them.
 const settings = [_]Setting{
     .{ .key = "digitalocean.token", .env = "DIGITALOCEAN_TOKEN" },
-    .{ .key = "ovh.endpoint", .env = "OVH_ENDPOINT" },
-    .{ .key = "ovh.application-key", .env = "OVH_APPLICATION_KEY" },
-    .{ .key = "ovh.application-secret", .env = "OVH_APPLICATION_SECRET" },
-    .{ .key = "ovh.consumer-key", .env = "OVH_CONSUMER_KEY" },
-    .{ .key = "ovh.project-id", .env = "OVH_CLOUD_PROJECT_SERVICE" },
     .{ .key = "hetzner.token", .env = "HCLOUD_TOKEN" },
     .{ .key = "cloudflare.token", .env = "CLOUDFLARE_TOKEN" },
     .{ .key = "cloudflare.account-id", .env = "CLOUDFLARE_ACCOUNT_ID" },
@@ -370,11 +364,6 @@ fn credentialValue(credentials: [settings.len]Credential, key: []const u8) ?[]co
 fn credentialsFrom(credentials: [settings.len]Credential) live_refresh.Credentials {
     return .{
         .digitalocean_token = credentialValue(credentials, "digitalocean.token"),
-        .ovh_endpoint = credentialValue(credentials, "ovh.endpoint"),
-        .ovh_application_key = credentialValue(credentials, "ovh.application-key"),
-        .ovh_application_secret = credentialValue(credentials, "ovh.application-secret"),
-        .ovh_consumer_key = credentialValue(credentials, "ovh.consumer-key"),
-        .ovh_project_id = credentialValue(credentials, "ovh.project-id"),
         .hetzner_token = credentialValue(credentials, "hetzner.token"),
         .cloudflare_token = credentialValue(credentials, "cloudflare.token"),
         .cloudflare_account_id = credentialValue(credentials, "cloudflare.account-id"),
@@ -457,7 +446,6 @@ fn sequentialPasses(
 /// Owns one instance of every remote provider, mirroring the set the core holds.
 const Instances = struct {
     digitalocean: digitalocean.DigitalOcean,
-    ovh: ovh.OVHcloud,
     hetzner: hetzner.Hetzner,
     cloudflare: cloudflare.Cloudflare,
     runpod: runpod.Runpod,
@@ -472,7 +460,6 @@ const Instances = struct {
     fn init() Instances {
         return .{
             .digitalocean = .init(),
-            .ovh = .init(),
             .hetzner = .init(),
             .cloudflare = .init(),
             .runpod = .init(),
@@ -488,7 +475,6 @@ const Instances = struct {
 
     fn deinit(self: *Instances) void {
         self.digitalocean.deinit();
-        self.ovh.deinit();
         self.hetzner.deinit();
         self.cloudflare.deinit();
         self.runpod.deinit();
@@ -504,7 +490,6 @@ const Instances = struct {
     fn providers(self: *Instances) live_refresh.Providers {
         return .{
             .digitalocean = &self.digitalocean,
-            .ovh = &self.ovh,
             .hetzner = &self.hetzner,
             .cloudflare = &self.cloudflare,
             .runpod = &self.runpod,
@@ -659,6 +644,8 @@ fn reportConcurrentRefresh(
         .track_claude = @intFromBool(options.claude),
         .track_opencode = @intFromBool(options.opencode),
         .use_github_cli = 0,
+        .has_source_filter = 0,
+        .source_ids = .{},
     };
     var wall_ns: [2]u64 = @splat(0);
     for (0..2) |iteration| {

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define COSTBAR_ABI_VERSION 6u
+#define COSTBAR_ABI_VERSION 12u
 
 typedef struct costbar_core costbar_core_t;
 
@@ -34,6 +34,10 @@ typedef struct costbar_refresh_options {
     uint8_t track_claude;
     uint8_t track_opencode;
     uint8_t use_github_cli;
+    uint8_t has_source_filter;
+    uint8_t write_cache;
+    costbar_bytes_t source_ids;
+    costbar_bytes_t cache_key;
 } costbar_refresh_options_t;
 
 typedef struct costbar_refresh_result {
@@ -82,6 +86,8 @@ typedef struct costbar_provider_view {
     size_t allowance_count;
     uint8_t has_token_usage;
     size_t token_usage_window_count;
+    size_t token_usage_series_count;
+    size_t spend_series_count;
     size_t financial_count;
 } costbar_provider_view_t;
 
@@ -137,6 +143,40 @@ typedef struct costbar_token_usage_window_view {
     uint64_t reasoning_tokens;
 } costbar_token_usage_window_view_t;
 
+typedef struct costbar_token_usage_series_view {
+    costbar_bytes_t id;
+    costbar_bytes_t label;
+    int64_t period_start_unix;
+    int64_t period_end_exclusive_unix;
+    size_t bucket_count;
+} costbar_token_usage_series_view_t;
+
+typedef struct costbar_token_usage_bucket_view {
+    int64_t period_start_unix;
+    int64_t period_end_exclusive_unix;
+    uint64_t input_tokens;
+    uint64_t output_tokens;
+    uint64_t cache_read_tokens;
+    uint64_t cache_creation_tokens;
+    uint64_t reasoning_tokens;
+} costbar_token_usage_bucket_view_t;
+
+typedef struct costbar_spend_series_view {
+    costbar_bytes_t id;
+    costbar_bytes_t label;
+    costbar_bytes_t currency;
+    int64_t period_start_unix;
+    int64_t period_end_exclusive_unix;
+    size_t bucket_count;
+} costbar_spend_series_view_t;
+
+typedef struct costbar_spend_bucket_view {
+    int64_t period_start_unix;
+    int64_t period_end_exclusive_unix;
+    int64_t amount_micros;
+    uint64_t usage_quantity;
+} costbar_spend_bucket_view_t;
+
 typedef struct costbar_financial_view {
     costbar_bytes_t currency;
     int64_t current_cost_micros;
@@ -155,6 +195,11 @@ costbar_status_t costbar_claude_status_bridge_restore(void);
 
 costbar_core_t *costbar_core_create(void);
 void costbar_core_destroy(costbar_core_t *core);
+
+/* Returns newline-delimited organizations visible to the active gh session. */
+costbar_status_t costbar_github_cli_organizations(
+    costbar_bytes_t *out_organizations
+);
 
 /* Copies one credential/configuration value into Zig-owned memory. */
 costbar_status_t costbar_core_set_setting(
@@ -215,6 +260,13 @@ costbar_status_t costbar_core_cached_snapshot_create(
     int64_t period_end_exclusive_unix,
     costbar_snapshot_t **out_snapshot
 );
+costbar_status_t costbar_core_cached_account_snapshot_create(
+    costbar_core_t *core,
+    costbar_bytes_t cache_key,
+    int64_t period_start_unix,
+    int64_t period_end_exclusive_unix,
+    costbar_snapshot_t **out_snapshot
+);
 void costbar_snapshot_destroy(costbar_snapshot_t *snapshot);
 costbar_status_t costbar_snapshot_header(
     const costbar_snapshot_t *snapshot,
@@ -258,6 +310,32 @@ costbar_status_t costbar_snapshot_token_usage_window(
     size_t provider_index,
     size_t index,
     costbar_token_usage_window_view_t *out_window
+);
+costbar_status_t costbar_snapshot_token_usage_series(
+    const costbar_snapshot_t *snapshot,
+    size_t provider_index,
+    size_t index,
+    costbar_token_usage_series_view_t *out_series
+);
+costbar_status_t costbar_snapshot_token_usage_bucket(
+    const costbar_snapshot_t *snapshot,
+    size_t provider_index,
+    size_t series_index,
+    size_t index,
+    costbar_token_usage_bucket_view_t *out_bucket
+);
+costbar_status_t costbar_snapshot_spend_series(
+    const costbar_snapshot_t *snapshot,
+    size_t provider_index,
+    size_t index,
+    costbar_spend_series_view_t *out_series
+);
+costbar_status_t costbar_snapshot_spend_bucket(
+    const costbar_snapshot_t *snapshot,
+    size_t provider_index,
+    size_t series_index,
+    size_t index,
+    costbar_spend_bucket_view_t *out_bucket
 );
 costbar_status_t costbar_snapshot_financial(
     const costbar_snapshot_t *snapshot,

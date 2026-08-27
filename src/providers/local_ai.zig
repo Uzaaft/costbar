@@ -23,6 +23,18 @@ pub fn LocalAI(
             token_usage: TokenCounts = .{},
         };
 
+        pub const UsageBucket = struct {
+            period: model.Period,
+            token_usage: TokenCounts = .{},
+        };
+
+        pub const UsageSeries = struct {
+            id: []const u8,
+            label: []const u8,
+            period: model.Period,
+            buckets: []const UsageBucket,
+        };
+
         pub const Allowance = struct {
             id: []const u8,
             label: []const u8,
@@ -36,6 +48,7 @@ pub fn LocalAI(
             token_usage: TokenCounts = .{},
             allowance_windows: []const Allowance = &.{},
             token_usage_windows: []const UsageWindow = &.{},
+            token_usage_series: []const UsageSeries = &.{},
             models: []const []const u8 = &.{},
             source: []const u8,
             updated_at_unix: i64,
@@ -53,6 +66,7 @@ pub fn LocalAI(
             updated_at_unix: i64,
             allowances: []const RawAllowance,
             usage_windows: []const RawUsageWindow,
+            usage_series: []const RawUsageSeries,
             models: []const []const u8,
 
             fn deinit(self: *OwnedSnapshot) void {
@@ -83,11 +97,24 @@ pub fn LocalAI(
             token_usage: RawTokens = .{},
         };
 
+        const RawUsageBucket = struct {
+            period: model.Period,
+            token_usage: RawTokens = .{},
+        };
+
+        const RawUsageSeries = struct {
+            id: []const u8,
+            label: []const u8,
+            period: model.Period,
+            buckets: []const RawUsageBucket = &.{},
+        };
+
         const RawSnapshot = struct {
             period: model.Period,
             token_usage: RawTokens = .{},
             allowance_windows: []const RawAllowance = &.{},
             token_usage_windows: []const RawUsageWindow = &.{},
+            token_usage_series: []const RawUsageSeries = &.{},
             models: []const []const u8 = &.{},
             source: []const u8,
             updated_at_unix: ?i64 = null,
@@ -148,6 +175,7 @@ pub fn LocalAI(
                 .updated_at_unix = input.updated_at_unix,
                 .allowances = undefined,
                 .usage_windows = undefined,
+                .usage_series = undefined,
                 .models = undefined,
             };
             errdefer replacement.deinit();
@@ -194,6 +222,32 @@ pub fn LocalAI(
                 };
             }
             replacement.usage_windows = usage_windows;
+
+            const usage_series = try arena.alloc(RawUsageSeries, input.token_usage_series.len);
+            for (input.token_usage_series, 0..) |series, series_index| {
+                try series.period.validate();
+                const buckets = try arena.alloc(RawUsageBucket, series.buckets.len);
+                for (series.buckets, 0..) |bucket, bucket_index| {
+                    try bucket.period.validate();
+                    buckets[bucket_index] = .{
+                        .period = bucket.period,
+                        .token_usage = .{
+                            .input_tokens = bucket.token_usage.input_tokens,
+                            .output_tokens = bucket.token_usage.output_tokens,
+                            .cache_read_tokens = bucket.token_usage.cache_read_tokens,
+                            .cache_creation_tokens = bucket.token_usage.cache_creation_tokens,
+                            .reasoning_tokens = bucket.token_usage.reasoning_tokens,
+                        },
+                    };
+                }
+                usage_series[series_index] = .{
+                    .id = try arena.dupe(u8, series.id),
+                    .label = try arena.dupe(u8, series.label),
+                    .period = series.period,
+                    .buckets = buckets,
+                };
+            }
+            replacement.usage_series = usage_series;
             if (self.snapshot) |*existing| existing.deinit();
             self.snapshot = replacement;
         }
@@ -250,6 +304,42 @@ pub fn LocalAI(
                 };
             }
 
+            const usage_series: []model.TokenUsageSeries = if (snapshot.usage_series.len == 0)
+                &.{}
+            else
+                try allocator.alloc(model.TokenUsageSeries, snapshot.usage_series.len);
+            var initialized_series: usize = 0;
+            errdefer {
+                for (usage_series[0..initialized_series]) |series| {
+                    if (series.buckets.len > 0) allocator.free(series.buckets);
+                }
+                if (usage_series.len > 0) allocator.free(usage_series);
+            }
+            for (snapshot.usage_series, 0..) |series, series_index| {
+                const buckets: []model.TokenUsageBucket = if (series.buckets.len == 0)
+                    &.{}
+                else
+                    try allocator.alloc(model.TokenUsageBucket, series.buckets.len);
+                errdefer if (buckets.len > 0) allocator.free(buckets);
+                for (series.buckets, 0..) |bucket, bucket_index| {
+                    buckets[bucket_index] = .{
+                        .period = bucket.period,
+                        .input_tokens = bucket.token_usage.input_tokens,
+                        .output_tokens = bucket.token_usage.output_tokens,
+                        .cache_read_tokens = bucket.token_usage.cache_read_tokens,
+                        .cache_creation_tokens = bucket.token_usage.cache_creation_tokens,
+                        .reasoning_tokens = bucket.token_usage.reasoning_tokens,
+                    };
+                }
+                usage_series[series_index] = .{
+                    .id = series.id,
+                    .label = series.label,
+                    .period = series.period,
+                    .buckets = buckets,
+                };
+                initialized_series += 1;
+            }
+
             return .{
                 .summary = .{
                     .id = provider_id,
@@ -274,6 +364,7 @@ pub fn LocalAI(
                     .updated_at_unix = snapshot.updated_at_unix,
                 },
                 .token_usage_windows = usage_windows,
+                .token_usage_series = usage_series,
             };
         }
 
@@ -294,6 +385,7 @@ pub fn LocalAI(
                 .updated_at_unix = received_at_unix,
                 .allowances = &.{},
                 .usage_windows = &.{},
+                .usage_series = &.{},
                 .models = &.{},
             };
             errdefer result.deinit();
@@ -322,6 +414,11 @@ pub fn LocalAI(
             result.allowances = raw.allowance_windows;
             for (raw.token_usage_windows) |window| try window.period.validate();
             result.usage_windows = raw.token_usage_windows;
+            for (raw.token_usage_series) |series| {
+                try series.period.validate();
+                for (series.buckets) |bucket| try bucket.period.validate();
+            }
+            result.usage_series = raw.token_usage_series;
             result.models = raw.models;
             return result;
         }

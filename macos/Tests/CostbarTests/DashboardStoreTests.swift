@@ -37,7 +37,7 @@ func dashboardStorePreservesCachedDataWhenBackgroundRefreshFails() async throws 
     core.refreshError = StubError.refreshFailed
     let store = DashboardStore(
         credentials: StubDashboardCredentials(),
-        pollingInterval: .seconds(60),
+        pollingSchedule: { .uniform(.seconds(60)) },
         coreFactory: { core }
     )
     defer { store.stopPolling() }
@@ -50,12 +50,40 @@ func dashboardStorePreservesCachedDataWhenBackgroundRefreshFails() async throws 
 
 @MainActor
 @Test
+func dashboardStoreDoesNotReplaceCachedCostsWithTokenOnlyRefresh() async throws {
+    let cached = dashboardFixture(generatedAtUnix: 123)
+    let tokenOnly = Dashboard(
+        period: .currentMonth(),
+        generatedAtUnix: 456,
+        totals: [],
+        providers: []
+    )
+    let core = StubDashboardCore(cached: cached, snapshot: tokenOnly)
+    core.refreshReport = .init(configuredCount: 2, refreshedCount: 2, errors: nil)
+    let store = DashboardStore(
+        credentials: StubDashboardCredentials(),
+        pollingSchedule: { .uniform(.seconds(60)) },
+        coreFactory: { core }
+    )
+    defer { store.stopPolling() }
+
+    for _ in 0 ..< 100 where core.refreshCount == 0 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(store.dashboard?.generatedAtUnix == 123)
+    #expect(store.dataSourceLabel == "stale")
+    #expect(store.lastUpdatedAt == Date(timeIntervalSince1970: 123))
+    #expect(store.errorMessage?.contains("showing the last cached overview") == true)
+}
+
+@MainActor
+@Test
 func dashboardStorePollsAfterItsInitialBackgroundRefresh() async throws {
     let refreshed = dashboardFixture(generatedAtUnix: 456)
     let core = StubDashboardCore(cached: nil, snapshot: refreshed)
     let store = DashboardStore(
         credentials: StubDashboardCredentials(),
-        pollingInterval: .milliseconds(10),
+        pollingSchedule: { .uniform(.milliseconds(10)) },
         coreFactory: { core }
     )
     defer { store.stopPolling() }
@@ -65,6 +93,63 @@ func dashboardStorePollsAfterItsInitialBackgroundRefresh() async throws {
     }
     #expect(core.refreshCount >= 2)
     #expect(store.dashboard?.generatedAtUnix == 456)
+    #expect(core.sourceSelections[0] == nil)
+    #expect(core.sourceSelections.dropFirst().contains { selection in
+        selection == Set(PollingSource.all.map(\.id))
+    })
+}
+
+@Test
+func pollingSettingsPersistDefaultAndSparseOverrides() throws {
+    let suite = "com.costbar.tests.polling.\(UUID().uuidString)"
+    let defaults = try #require(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+
+    #expect(PollingSettings.defaultInterval(defaults: defaults) == 300)
+    #expect(PollingSettings.overrides(defaults: defaults).isEmpty)
+
+    PollingSettings.save(
+        defaultInterval: 900,
+        overrides: ["codex": 60, "hetzner": 3_600, "unknown": 300],
+        defaults: defaults
+    )
+
+    #expect(PollingSettings.defaultInterval(defaults: defaults) == 900)
+    #expect(PollingSettings.overrides(defaults: defaults) == [
+        "codex": 60,
+        "hetzner": 3_600,
+    ])
+    let schedule = PollingSettings.schedule(defaults: defaults)
+    #expect(schedule.intervals["codex"] == .seconds(60))
+    #expect(schedule.intervals["hetzner"] == .seconds(3_600))
+    #expect(schedule.intervals["digitalocean"] == .seconds(900))
+}
+
+@MainActor
+@Test
+func pollingGroupsOnlyTheSourcesThatAreDue() async throws {
+    let refreshed = dashboardFixture(generatedAtUnix: 789)
+    let core = StubDashboardCore(cached: nil, snapshot: refreshed)
+    let store = DashboardStore(
+        credentials: StubDashboardCredentials(),
+        pollingSchedule: {
+            .init(intervals: [
+            "codex": .milliseconds(10),
+            "hetzner": .milliseconds(30),
+            ])
+        },
+        coreFactory: { core }
+    )
+    defer { store.stopPolling() }
+
+    for _ in 0 ..< 100 where core.sourceSelections.count < 4 {
+        try await Task.sleep(for: .milliseconds(10))
+    }
+
+    let selections = core.sourceSelections.dropFirst().compactMap { $0 }
+    #expect(selections.count >= 3)
+    #expect(selections[0].contains("codex"))
+    #expect(selections.contains { $0.contains("hetzner") })
 }
 
 private enum StubError: Error {
@@ -73,7 +158,7 @@ private enum StubError: Error {
 
 @MainActor
 private final class StubDashboardCredentials: DashboardCredentials {
-    func load() throws -> ProviderCredentials { .empty }
+    func loadAccountData() throws -> [ProviderAccountData] { [] }
 }
 
 @MainActor
@@ -82,13 +167,22 @@ private final class StubDashboardCore: DashboardCore {
     let snapshotValue: Dashboard
     var refreshCount = 0
     var refreshError: (any Error)?
+    var refreshReport = CostbarCore.RefreshReport(
+        configuredCount: 0,
+        refreshedCount: 0,
+        errors: nil
+    )
+    var sourceSelections: [Set<String>?] = []
 
     init(cached: Dashboard?, snapshot: Dashboard) {
         self.cached = cached
         snapshotValue = snapshot
     }
 
-    func cachedSnapshot(period _: Dashboard.Period) throws -> Dashboard? {
+    func cachedSnapshot(
+        period _: Dashboard.Period,
+        accountData _: [ProviderAccountData]
+    ) throws -> Dashboard? {
         cached
     }
 
@@ -96,17 +190,11 @@ private final class StubDashboardCore: DashboardCore {
         snapshotValue
     }
 
-    func refresh(
-        credentials _: ProviderCredentials,
-        period _: Dashboard.Period,
-        trackCodex _: Bool,
-        trackClaude _: Bool,
-        trackOpenCode _: Bool,
-        useGitHubCLI _: Bool
-    ) async throws -> CostbarCore.RefreshReport {
+    func refresh(_ request: DashboardRefreshRequest) async throws -> CostbarCore.RefreshReport {
         refreshCount += 1
+        sourceSelections.append(request.sourceIDs)
         if let refreshError { throw refreshError }
-        return .init(configuredCount: 0, refreshedCount: 0, errors: nil)
+        return refreshReport
     }
 }
 

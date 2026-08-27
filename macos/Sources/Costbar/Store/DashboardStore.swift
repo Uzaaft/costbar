@@ -1,24 +1,28 @@
 import Foundation
 
-@MainActor
-protocol DashboardCore: AnyObject {
-    func cachedSnapshot(period: Dashboard.Period) throws -> Dashboard?
-    func snapshot(period: Dashboard.Period) throws -> Dashboard
-    func refresh(
-        credentials: ProviderCredentials,
-        period: Dashboard.Period,
-        trackCodex: Bool,
-        trackClaude: Bool,
-        trackOpenCode: Bool,
-        useGitHubCLI: Bool
-    ) async throws -> CostbarCore.RefreshReport
+struct DashboardRefreshRequest: Sendable {
+    let accountData: [ProviderAccountData]
+    let period: Dashboard.Period
+    let trackedLocalSources: Set<LocalSource>
+    /// The sources this refresh is limited to, or `nil` to refresh everything.
+    let sourceIDs: Set<String>?
 }
 
-extension CostbarCore: DashboardCore {}
+@MainActor
+protocol DashboardCore: AnyObject {
+    func cachedSnapshot(
+        period: Dashboard.Period,
+        accountData: [ProviderAccountData]
+    ) throws -> Dashboard?
+    func snapshot(period: Dashboard.Period) throws -> Dashboard
+    func refresh(_ request: DashboardRefreshRequest) async throws -> CostbarCore.RefreshReport
+}
+
+extension ProviderAccountDashboardCore: DashboardCore {}
 
 @MainActor
 protocol DashboardCredentials: AnyObject {
-    func load() throws -> ProviderCredentials
+    func loadAccountData() throws -> [ProviderAccountData]
 }
 
 extension CredentialStore: DashboardCredentials {}
@@ -33,23 +37,30 @@ final class DashboardStore: ObservableObject {
 
     private var core: (any DashboardCore)?
     private let credentials: any DashboardCredentials
-    private let pollingInterval: Duration
+    private let pollingSchedule: () -> PollingSchedule
     private var refreshTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
 
     init(
         credentials: any DashboardCredentials = CredentialStore(),
-        pollingInterval: Duration = .seconds(300),
+        pollingSchedule: @escaping () -> PollingSchedule = { PollingSettings.schedule() },
         automaticallyRefreshes: Bool = true,
-        coreFactory: () throws -> any DashboardCore = { try CostbarCore() }
+        coreFactory: () throws -> any DashboardCore = { try ProviderAccountDashboardCore() }
     ) {
         self.credentials = credentials
-        self.pollingInterval = pollingInterval
+        self.pollingSchedule = pollingSchedule
         do {
             let core = try coreFactory()
             self.core = core
             let period = Dashboard.Period.currentMonth()
-            if let cached = try core.cachedSnapshot(period: period) {
+            let savedAccountData: [ProviderAccountData]
+            do {
+                savedAccountData = try credentials.loadAccountData()
+            } catch {
+                savedAccountData = []
+                errorMessage = error.localizedDescription
+            }
+            if let cached = try core.cachedSnapshot(period: period, accountData: savedAccountData) {
                 dashboard = cached
                 dataSourceLabel = "cached"
                 lastUpdatedAt = Date(timeIntervalSince1970: TimeInterval(cached.generatedAtUnix))
@@ -75,36 +86,36 @@ final class DashboardStore: ObservableObject {
         isRefreshing = true
         refreshTask = Task { [weak self] in
             guard let self else { return }
-            await refresh(core: core)
+            await refresh(core: core, sourceIDs: nil)
         }
     }
 
-    private func refresh(core: any DashboardCore) async {
+    private func refresh(core: any DashboardCore, sourceIDs: Set<String>?) async {
         defer { isRefreshing = false }
         let period = Dashboard.Period.currentMonth()
         let hadDashboard = dashboard != nil
+        let isFullRefresh = sourceIDs == nil
         var errors: [String] = []
         var configuredProviderCount = 0
         var refreshedProviderCount = 0
         var completedRefresh = false
-        var saved: ProviderCredentials?
+        var preservedCachedCosts = false
+        var saved: [ProviderAccountData]?
 
         do {
-            saved = try credentials.load()
+            saved = try credentials.loadAccountData()
         } catch {
             errors.append(error.localizedDescription)
         }
 
         if let saved {
             do {
-                let report = try await core.refresh(
-                    credentials: saved,
+                let report = try await core.refresh(.init(
+                    accountData: saved,
                     period: period,
-                    trackCodex: LocalAISettings.tracksCodex(),
-                    trackClaude: LocalAISettings.tracksClaude(),
-                    trackOpenCode: LocalAISettings.tracksOpenCode(),
-                    useGitHubCLI: CLIAuthSettings.usesGitHubCLI()
-                )
+                    trackedLocalSources: LocalAISettings.trackedSources(),
+                    sourceIDs: sourceIDs
+                ))
                 completedRefresh = true
                 configuredProviderCount = report.configuredCount
                 refreshedProviderCount = report.refreshedCount
@@ -116,35 +127,59 @@ final class DashboardStore: ObservableObject {
 
         let shouldPublishSnapshot = !hadDashboard || (
             completedRefresh &&
-                (configuredProviderCount == 0 || refreshedProviderCount > 0)
+                (refreshedProviderCount > 0 ||
+                    (isFullRefresh && configuredProviderCount == 0))
         )
         if shouldPublishSnapshot {
             do {
-                dashboard = try core.snapshot(period: period)
-                lastUpdatedAt = .now
+                let refreshedDashboard = try core.snapshot(period: period)
+                if let currentDashboard = dashboard,
+                   !currentDashboard.totals.isEmpty,
+                   refreshedDashboard.totals.isEmpty {
+                    preservedCachedCosts = true
+                    errors.append(
+                        "Cost providers returned no totals; showing the last cached overview."
+                    )
+                } else {
+                    dashboard = refreshedDashboard
+                    lastUpdatedAt = .now
+                }
             } catch {
                 errors.append(error.localizedDescription)
             }
         }
 
-        dataSourceLabel = if !completedRefresh {
-            hadDashboard ? "stale" : "unavailable"
+        if preservedCachedCosts {
+            dataSourceLabel = "stale"
+        } else if !completedRefresh {
+            dataSourceLabel = hadDashboard ? "stale" : "unavailable"
         } else if configuredProviderCount == 0 {
-            "not configured"
+            if isFullRefresh { dataSourceLabel = "not configured" }
         } else if refreshedProviderCount == configuredProviderCount {
-            "live"
+            dataSourceLabel = "live"
         } else {
-            "stale"
+            dataSourceLabel = "stale"
         }
         errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
     }
 
+    func pollingSettingsDidChange() {
+        guard pollingTask != nil else { return }
+        startPolling()
+    }
+
+    private func poll(sourceIDs: Set<String>) async {
+        guard let core, !isRefreshing else { return }
+        isRefreshing = true
+        await refresh(core: core, sourceIDs: sourceIDs)
+    }
+
     private func startPolling() {
         pollingTask?.cancel()
-        let interval = pollingInterval
+        let schedule = pollingSchedule()
         pollingTask = Task { [weak self] in
-            await RefreshPolling.run(every: interval) { [weak self] in
-                self?.refresh()
+            await RefreshPolling.run(schedule: schedule) { [weak self] sourceIDs in
+                await self?.poll(sourceIDs: sourceIDs)
             }
         }
     }
@@ -152,19 +187,5 @@ final class DashboardStore: ObservableObject {
     func stopPolling() {
         pollingTask?.cancel()
         pollingTask = nil
-    }
-}
-
-@MainActor
-enum RefreshPolling {
-    static func run(every interval: Duration, action: @escaping () -> Void) async {
-        while !Task.isCancelled {
-            do {
-                try await Task.sleep(for: interval)
-            } catch {
-                return
-            }
-            action()
-        }
     }
 }

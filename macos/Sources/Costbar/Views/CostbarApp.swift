@@ -7,8 +7,16 @@ struct CostbarApp: App {
   @StateObject private var settings: ProviderSettingsStore
 
   init() {
-    let credentials = CredentialStore()
-    _store = StateObject(wrappedValue: DashboardStore(credentials: credentials))
+    let isTesting = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+    let credentials = CredentialStore(
+      service: isTesting
+        ? "com.costbar.provider-credentials.test-host"
+        : "com.costbar.provider-credentials"
+    )
+    _store = StateObject(wrappedValue: DashboardStore(
+      credentials: credentials,
+      automaticallyRefreshes: !isTesting
+    ))
     _settings = StateObject(wrappedValue: ProviderSettingsStore(credentials: credentials))
   }
 

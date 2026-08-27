@@ -2,31 +2,22 @@ import Foundation
 
 /// UI preference only. Zig performs the actual local discovery and parsing.
 enum LocalAISettings {
-    private static let codexKey = "track-codex-local-usage-v1"
-    private static let claudeKey = "track-claude-local-usage-v1"
-    private static let openCodeKey = "track-opencode-local-usage-v1"
-
-    static func tracksCodex(defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: codexKey)
+    static func trackedSources(defaults: UserDefaults = .standard) -> Set<LocalSource> {
+        Set(LocalSource.allCases.filter { defaults.bool(forKey: key(for: $0)) })
     }
 
-    static func tracksClaude(defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: claudeKey)
+    static func save(trackedSources: Set<LocalSource>, defaults: UserDefaults = .standard) {
+        for source in LocalSource.allCases {
+            defaults.set(trackedSources.contains(source), forKey: key(for: source))
+        }
     }
 
-    static func tracksOpenCode(defaults: UserDefaults = .standard) -> Bool {
-        defaults.bool(forKey: openCodeKey)
-    }
-
-    static func save(
-        tracksCodex: Bool,
-        tracksClaude: Bool,
-        tracksOpenCode: Bool,
-        defaults: UserDefaults = .standard
-    ) {
-        defaults.set(tracksCodex, forKey: codexKey)
-        defaults.set(tracksClaude, forKey: claudeKey)
-        defaults.set(tracksOpenCode, forKey: openCodeKey)
+    private static func key(for source: LocalSource) -> String {
+        switch source {
+        case .codex: "track-codex-local-usage-v1"
+        case .claude: "track-claude-local-usage-v1"
+        case .opencode: "track-opencode-local-usage-v1"
+        }
     }
 }
 

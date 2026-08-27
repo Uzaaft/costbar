@@ -4,7 +4,6 @@ const model = @import("model.zig");
 const Provider = @import("provider.zig").Provider;
 const Registry = @import("registry.zig").Registry;
 const digitalocean = @import("providers/digitalocean.zig");
-const ovh = @import("providers/ovh.zig");
 const hetzner = @import("providers/hetzner.zig");
 const cloudflare = @import("providers/cloudflare.zig");
 const runpod = @import("providers/runpod.zig");
@@ -46,6 +45,10 @@ pub const RefreshOptions = extern struct {
     track_claude: u8,
     track_opencode: u8,
     use_github_cli: u8,
+    has_source_filter: u8,
+    write_cache: u8 = 1,
+    source_ids: Bytes,
+    cache_key: Bytes = .{},
 };
 
 pub const RefreshResult = extern struct {
@@ -94,6 +97,8 @@ pub const ProviderView = extern struct {
     allowance_count: usize,
     has_token_usage: u8,
     token_usage_window_count: usize,
+    token_usage_series_count: usize,
+    spend_series_count: usize,
     financial_count: usize,
 };
 
@@ -149,6 +154,40 @@ pub const TokenUsageWindowView = extern struct {
     reasoning_tokens: u64,
 };
 
+pub const TokenUsageSeriesView = extern struct {
+    id: Bytes,
+    label: Bytes,
+    period_start_unix: i64,
+    period_end_exclusive_unix: i64,
+    bucket_count: usize,
+};
+
+pub const TokenUsageBucketView = extern struct {
+    period_start_unix: i64,
+    period_end_exclusive_unix: i64,
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: u64,
+    reasoning_tokens: u64,
+};
+
+pub const SpendSeriesView = extern struct {
+    id: Bytes,
+    label: Bytes,
+    currency: Bytes,
+    period_start_unix: i64,
+    period_end_exclusive_unix: i64,
+    bucket_count: usize,
+};
+
+pub const SpendBucketView = extern struct {
+    period_start_unix: i64,
+    period_end_exclusive_unix: i64,
+    amount_micros: i64,
+    usage_quantity: u64,
+};
+
 pub const FinancialView = extern struct {
     currency: Bytes,
     current_cost_micros: i64,
@@ -171,7 +210,6 @@ const Snapshot = struct {
 
 const Core = struct {
     digitalocean_provider: digitalocean.DigitalOcean,
-    ovh_provider: ovh.OVHcloud,
     hetzner_provider: hetzner.Hetzner,
     cloudflare_provider: cloudflare.Cloudflare,
     runpod_provider: runpod.Runpod,
@@ -195,7 +233,6 @@ const Core = struct {
         errdefer allocator.destroy(core);
 
         core.digitalocean_provider = .init();
-        core.ovh_provider = .init();
         core.hetzner_provider = .init();
         core.cloudflare_provider = .init();
         core.runpod_provider = .init();
@@ -216,7 +253,6 @@ const Core = struct {
         core.registry = Registry.init(allocator);
         errdefer core.registry.deinit();
         try core.registry.addConfigured(Provider.from(&core.digitalocean_provider), false);
-        try core.registry.addConfigured(Provider.from(&core.ovh_provider), false);
         try core.registry.addConfigured(Provider.from(&core.hetzner_provider), false);
         try core.registry.addConfigured(Provider.from(&core.cloudflare_provider), false);
         try core.registry.addConfigured(Provider.from(&core.runpod_provider), false);
@@ -236,7 +272,6 @@ const Core = struct {
     fn destroy(core: *Core) void {
         core.registry.deinit();
         core.digitalocean_provider.deinit();
-        core.ovh_provider.deinit();
         core.hetzner_provider.deinit();
         core.cloudflare_provider.deinit();
         core.runpod_provider.deinit();
@@ -258,7 +293,25 @@ const Core = struct {
 };
 
 export fn costbar_abi_version() u32 {
-    return 6;
+    return 12;
+}
+
+/// Returns the organizations visible to the active GitHub CLI identity as a
+/// newline-delimited UTF-8 list. Authentication stays inside `gh`.
+export fn costbar_github_cli_organizations(out_organizations: ?*Bytes) Status {
+    const output = out_organizations orelse return .invalid_argument;
+    output.* = .{};
+    const home_pointer = std.c.getenv("HOME") orelse return .internal_error;
+    const home = std.mem.span(home_pointer);
+    var io_threaded: std.Io.Threaded = .init(allocator, .{});
+    defer io_threaded.deinit();
+    const organizations = live_refresh.discoverGitHubCLIOrganizations(
+        allocator,
+        io_threaded.io(),
+        home,
+    ) catch |err| return statusForError(err);
+    output.* = .{ .ptr = organizations.ptr, .len = organizations.len };
+    return .ok;
 }
 
 /// Stores one opaque credential/configuration value in Zig-owned memory. An
@@ -311,9 +364,10 @@ export fn costbar_decode_credential_json_field(
     return .ok;
 }
 
-/// Refreshes every configured provider concurrently. The Swift caller only
-/// supplies the selected time window and local-provider UI toggles; HTTP,
-/// filesystem access, JSON/NDJSON, pagination, and aggregation are all Zig.
+/// Refreshes the selected configured providers concurrently. An absent source
+/// filter selects every source; a present filter is a newline-delimited list
+/// of stable provider IDs. HTTP, filesystem access, JSON/NDJSON, pagination,
+/// and aggregation are all Zig.
 export fn costbar_core_refresh(
     core: ?*Core,
     options: RefreshOptions,
@@ -327,6 +381,17 @@ export fn costbar_core_refresh(
         .end_exclusive_unix = options.period_end_exclusive_unix,
     };
     period.validate() catch return .invalid_argument;
+    if (options.has_source_filter > 1 or options.write_cache > 1) return .invalid_argument;
+    const source_ids = borrowedSlice(options.source_ids) orelse
+        return .invalid_argument;
+    const cache_key = borrowedSlice(options.cache_key) orelse
+        return .invalid_argument;
+    const source_filter: ?[]const u8 = if (options.has_source_filter == 1)
+        source_ids
+    else
+        null;
+    if (!validSourceFilter(source_filter)) return .invalid_argument;
+    if (cache_key.len > 0 and !validCacheKey(cache_key)) return .invalid_argument;
 
     var credentials = credentialsFrom(core_value.settings);
     credentials.github_use_cli = options.use_github_cli != 0;
@@ -354,7 +419,9 @@ export fn costbar_core_refresh(
     var context_count: usize = 0;
     inline for (std.meta.fields(live_refresh.Kind)) |field| {
         const kind: live_refresh.Kind = @enumFromInt(field.value);
-        if (credentials.isConfigured(kind)) {
+        if (credentials.isConfigured(kind) and
+            sourceIsSelected(source_filter, liveProviderId(kind)))
+        {
             contexts[context_count] = .{
                 .core = core_value,
                 .standard_client = &standard_client,
@@ -367,7 +434,7 @@ export fn costbar_core_refresh(
             context_count += 1;
         }
     }
-    if (options.track_codex != 0) {
+    if (options.track_codex != 0 and sourceIsSelected(source_filter, "codex")) {
         contexts[context_count] = .{
             .core = core_value,
             .standard_client = &standard_client,
@@ -379,7 +446,7 @@ export fn costbar_core_refresh(
         };
         context_count += 1;
     }
-    if (options.track_claude != 0) {
+    if (options.track_claude != 0 and sourceIsSelected(source_filter, "claude")) {
         contexts[context_count] = .{
             .core = core_value,
             .standard_client = &standard_client,
@@ -391,7 +458,7 @@ export fn costbar_core_refresh(
         };
         context_count += 1;
     }
-    if (options.track_opencode != 0) {
+    if (options.track_opencode != 0 and sourceIsSelected(source_filter, "opencode")) {
         contexts[context_count] = .{
             .core = core_value,
             .standard_client = &standard_client,
@@ -432,8 +499,9 @@ export fn costbar_core_refresh(
         const owned = errors.toOwnedSlice() catch return .out_of_memory;
         result.errors = .{ .ptr = owned.ptr, .len = owned.len };
     }
-    if (!builtin.is_test and home.len > 0 and
-        (result.refreshed_count > 0 or result.configured_count == 0))
+    if (options.write_cache != 0 and !builtin.is_test and home.len > 0 and
+        (result.refreshed_count > 0 or
+            (source_filter == null and result.configured_count == 0)))
     {
         const maybe_dashboard: ?model.Dashboard = core_value.registry.collect(
             allocator,
@@ -442,12 +510,22 @@ export fn costbar_core_refresh(
         ) catch null;
         if (maybe_dashboard) |dashboard| {
             defer dashboard.deinit(allocator);
-            dashboard_cache.saveDefault(
-                allocator,
-                standard_client.io,
-                home,
-                dashboard,
-            ) catch {};
+            if (cache_key.len > 0) {
+                dashboard_cache.saveAccount(
+                    allocator,
+                    standard_client.io,
+                    home,
+                    cache_key,
+                    dashboard,
+                ) catch {};
+            } else {
+                dashboard_cache.saveDefault(
+                    allocator,
+                    standard_client.io,
+                    home,
+                    dashboard,
+                ) catch {};
+            }
         }
     }
     return .ok;
@@ -580,6 +658,28 @@ export fn costbar_core_cached_snapshot_create(
     out_snapshot: ?*?*Snapshot,
 ) Status {
     _ = core orelse return .invalid_argument;
+    return cachedSnapshotCreate(null, period_start_unix, period_end_exclusive_unix, out_snapshot);
+}
+
+export fn costbar_core_cached_account_snapshot_create(
+    core: ?*Core,
+    cache_key_bytes: Bytes,
+    period_start_unix: i64,
+    period_end_exclusive_unix: i64,
+    out_snapshot: ?*?*Snapshot,
+) Status {
+    _ = core orelse return .invalid_argument;
+    const cache_key = borrowedSlice(cache_key_bytes) orelse return .invalid_argument;
+    if (!validCacheKey(cache_key)) return .invalid_argument;
+    return cachedSnapshotCreate(cache_key, period_start_unix, period_end_exclusive_unix, out_snapshot);
+}
+
+fn cachedSnapshotCreate(
+    cache_key: ?[]const u8,
+    period_start_unix: i64,
+    period_end_exclusive_unix: i64,
+    out_snapshot: ?*?*Snapshot,
+) Status {
     const output = out_snapshot orelse return .invalid_argument;
     output.* = null;
     const period = model.Period{
@@ -590,12 +690,22 @@ export fn costbar_core_cached_snapshot_create(
     const home_pointer = std.c.getenv("HOME") orelse return .unsupported;
     var io_threaded: std.Io.Threaded = .init(allocator, .{});
     defer io_threaded.deinit();
-    var loaded = (dashboard_cache.loadDefault(
-        allocator,
-        io_threaded.io(),
-        std.mem.span(home_pointer),
-        period,
-    ) catch return .unsupported) orelse return .unsupported;
+    const maybe_loaded = if (cache_key) |key|
+        dashboard_cache.loadAccount(
+            allocator,
+            io_threaded.io(),
+            std.mem.span(home_pointer),
+            key,
+            period,
+        )
+    else
+        dashboard_cache.loadDefault(
+            allocator,
+            io_threaded.io(),
+            std.mem.span(home_pointer),
+            period,
+        );
+    var loaded = (maybe_loaded catch return .unsupported) orelse return .unsupported;
     const snapshot = allocator.create(Snapshot) catch {
         loaded.deinit();
         return .out_of_memory;
@@ -677,6 +787,8 @@ export fn costbar_snapshot_provider(
         .allowance_count = report.allowance_windows.len,
         .has_token_usage = @intFromBool(report.token_usage != null),
         .token_usage_window_count = report.token_usage_windows.len,
+        .token_usage_series_count = report.token_usage_series.len,
+        .spend_series_count = report.spend_series.len,
         .financial_count = report.financials.len,
     };
     return .ok;
@@ -792,6 +904,94 @@ export fn costbar_snapshot_token_usage_window(
     return .ok;
 }
 
+export fn costbar_snapshot_token_usage_series(
+    snapshot: ?*const Snapshot,
+    provider_index: usize,
+    index: usize,
+    out_series: ?*TokenUsageSeriesView,
+) Status {
+    const report = snapshotReport(snapshot, provider_index) orelse return .invalid_argument;
+    const output = out_series orelse return .invalid_argument;
+    if (index >= report.token_usage_series.len) return .invalid_argument;
+    const series = report.token_usage_series[index];
+    output.* = .{
+        .id = bytesView(series.id),
+        .label = bytesView(series.label),
+        .period_start_unix = series.period.start_unix,
+        .period_end_exclusive_unix = series.period.end_exclusive_unix,
+        .bucket_count = series.buckets.len,
+    };
+    return .ok;
+}
+
+export fn costbar_snapshot_token_usage_bucket(
+    snapshot: ?*const Snapshot,
+    provider_index: usize,
+    series_index: usize,
+    index: usize,
+    out_bucket: ?*TokenUsageBucketView,
+) Status {
+    const report = snapshotReport(snapshot, provider_index) orelse return .invalid_argument;
+    const output = out_bucket orelse return .invalid_argument;
+    if (series_index >= report.token_usage_series.len) return .invalid_argument;
+    const series = report.token_usage_series[series_index];
+    if (index >= series.buckets.len) return .invalid_argument;
+    const bucket = series.buckets[index];
+    output.* = .{
+        .period_start_unix = bucket.period.start_unix,
+        .period_end_exclusive_unix = bucket.period.end_exclusive_unix,
+        .input_tokens = bucket.input_tokens,
+        .output_tokens = bucket.output_tokens,
+        .cache_read_tokens = bucket.cache_read_tokens,
+        .cache_creation_tokens = bucket.cache_creation_tokens,
+        .reasoning_tokens = bucket.reasoning_tokens,
+    };
+    return .ok;
+}
+
+export fn costbar_snapshot_spend_series(
+    snapshot: ?*const Snapshot,
+    provider_index: usize,
+    index: usize,
+    out_series: ?*SpendSeriesView,
+) Status {
+    const report = snapshotReport(snapshot, provider_index) orelse return .invalid_argument;
+    const output = out_series orelse return .invalid_argument;
+    if (index >= report.spend_series.len) return .invalid_argument;
+    const series = report.spend_series[index];
+    output.* = .{
+        .id = bytesView(series.id),
+        .label = bytesView(series.label),
+        .currency = bytesView(series.currency),
+        .period_start_unix = series.period.start_unix,
+        .period_end_exclusive_unix = series.period.end_exclusive_unix,
+        .bucket_count = series.buckets.len,
+    };
+    return .ok;
+}
+
+export fn costbar_snapshot_spend_bucket(
+    snapshot: ?*const Snapshot,
+    provider_index: usize,
+    series_index: usize,
+    index: usize,
+    out_bucket: ?*SpendBucketView,
+) Status {
+    const report = snapshotReport(snapshot, provider_index) orelse return .invalid_argument;
+    const output = out_bucket orelse return .invalid_argument;
+    if (series_index >= report.spend_series.len) return .invalid_argument;
+    const series = report.spend_series[series_index];
+    if (index >= series.buckets.len) return .invalid_argument;
+    const bucket = series.buckets[index];
+    output.* = .{
+        .period_start_unix = bucket.period.start_unix,
+        .period_end_exclusive_unix = bucket.period.end_exclusive_unix,
+        .amount_micros = bucket.amount_micros,
+        .usage_quantity = bucket.usage_quantity,
+    };
+    return .ok;
+}
+
 export fn costbar_snapshot_financial(
     snapshot: ?*const Snapshot,
     provider_index: usize,
@@ -839,7 +1039,6 @@ const WorkerContext = struct {
         return switch (self.kind) {
             .remote => |kind| switch (kind) {
                 .digitalocean => "DigitalOcean",
-                .ovh => "OVHcloud",
                 .hetzner => "Hetzner",
                 .cloudflare => "Cloudflare",
                 .runpod => "Runpod",
@@ -892,14 +1091,50 @@ fn runWorker(context: *WorkerContext) !void {
         },
         .codex => {
             if (context.home.len == 0) return error.HomeUnavailable;
-            try context.core.codex_usage.refreshDefaultRoots(
+            const codex_home = try codexHomePath(
+                allocator,
+                context.core.settings,
+                context.home,
+            );
+            defer allocator.free(codex_home);
+            var oauth_limits: ?local_usage.Limits = null;
+            var oauth_failure: ?anyerror = null;
+            if (codex.loadOAuthCredentials(
+                allocator,
+                context.standard_client.io,
+                codex_home,
+            )) |loaded_credentials| {
+                var credentials = loaded_credentials;
+                defer credentials.deinit();
+                if (context.core.settings.get("codex.account-id")) |account_id| {
+                    const configured = std.mem.trim(u8, account_id, " \t\r\n");
+                    if (configured.len > 0) credentials.account_id = configured;
+                }
+                oauth_limits = codex.fetchOAuthLimits(
+                    allocator,
+                    context.standard_client,
+                    credentials,
+                    context.now,
+                ) catch |err| blk: {
+                    oauth_failure = err;
+                    break :blk null;
+                };
+            } else |err| {
+                oauth_failure = err;
+            }
+            try refreshCodexHomeRoots(
+                &context.core.codex_usage,
                 context.standard_client.io,
                 context.home,
+                codex_home,
                 localUsageDiscoveryPeriod(context.period, context.now),
             );
             var aggregate = try context.core.codex_usage.aggregatePeriod(context.period);
             defer aggregate.deinit();
-            if (!aggregate.has_tokens and aggregate.limits == null) return error.NoLocalUsage;
+            const limits = preferredCodexLimits(oauth_limits, aggregate.limits);
+            if (!aggregate.has_tokens and limits == null) {
+                return oauth_failure orelse error.NoLocalUsage;
+            }
             var usage_windows: [local_usage_window_definitions.len]codex.Codex.UsageWindow = undefined;
             const windows = try collectUsageWindows(
                 codex.Codex,
@@ -907,10 +1142,29 @@ fn runWorker(context: *WorkerContext) !void {
                 context.now,
                 &usage_windows,
             );
+            var usage_series: [local_usage_window_definitions.len + 1]codex.Codex.UsageSeries = undefined;
+            var usage_buckets: [local_usage_window_definitions.len + 1][max_local_usage_buckets]codex.Codex.UsageBucket = undefined;
+            const series = try collectUsageSeries(
+                codex.Codex,
+                &context.core.codex_usage,
+                context.period,
+                context.now,
+                &usage_series,
+                &usage_buckets,
+            );
             try updateCodex(
                 &context.core.codex_provider,
                 aggregate,
                 windows,
+                series,
+                limits,
+                if (oauth_limits != null)
+                    if (aggregate.has_tokens)
+                        "Codex OAuth quota and local sessions"
+                    else
+                        "Codex OAuth quota"
+                else
+                    "Local Codex sessions",
                 context.period,
                 context.now,
             );
@@ -937,11 +1191,22 @@ fn runWorker(context: *WorkerContext) !void {
                 context.now,
                 &usage_windows,
             );
+            var usage_series: [local_usage_window_definitions.len + 1]claude.Claude.UsageSeries = undefined;
+            var usage_buckets: [local_usage_window_definitions.len + 1][max_local_usage_buckets]claude.Claude.UsageBucket = undefined;
+            const series = try collectUsageSeries(
+                claude.Claude,
+                &context.core.claude_usage,
+                context.period,
+                context.now,
+                &usage_series,
+                &usage_buckets,
+            );
             try updateClaude(
                 &context.core.claude_provider,
                 aggregate,
                 status_limits,
                 windows,
+                series,
                 context.period,
                 context.now,
             );
@@ -962,7 +1227,6 @@ fn runWorker(context: *WorkerContext) !void {
 fn liveProviders(core: *Core) live_refresh.Providers {
     return .{
         .digitalocean = &core.digitalocean_provider,
-        .ovh = &core.ovh_provider,
         .hetzner = &core.hetzner_provider,
         .cloudflare = &core.cloudflare_provider,
         .runpod = &core.runpod_provider,
@@ -979,11 +1243,6 @@ fn liveProviders(core: *Core) live_refresh.Providers {
 fn credentialsFrom(settings: std.BufMap) live_refresh.Credentials {
     return .{
         .digitalocean_token = settings.get("digitalocean.token"),
-        .ovh_endpoint = settings.get("ovh.endpoint"),
-        .ovh_application_key = settings.get("ovh.application-key"),
-        .ovh_application_secret = settings.get("ovh.application-secret"),
-        .ovh_consumer_key = settings.get("ovh.consumer-key"),
-        .ovh_project_id = settings.get("ovh.project-id"),
         .hetzner_token = settings.get("hetzner.token"),
         .cloudflare_token = settings.get("cloudflare.token"),
         .cloudflare_account_id = settings.get("cloudflare.account-id"),
@@ -1018,7 +1277,6 @@ fn syncRemoteProviderConfiguration(
 fn liveProviderId(kind: live_refresh.Kind) []const u8 {
     return switch (kind) {
         .digitalocean => "digitalocean",
-        .ovh => "ovh",
         .hetzner => "hetzner",
         .cloudflare => "cloudflare",
         .runpod => "runpod",
@@ -1032,14 +1290,47 @@ fn liveProviderId(kind: live_refresh.Kind) []const u8 {
     };
 }
 
+fn sourceIsSelected(filter: ?[]const u8, provider_id: []const u8) bool {
+    const source_ids = filter orelse return true;
+    var lines = std.mem.splitScalar(u8, source_ids, '\n');
+    while (lines.next()) |source_id| {
+        if (std.mem.eql(u8, source_id, provider_id)) return true;
+    }
+    return false;
+}
+
+fn validSourceFilter(filter: ?[]const u8) bool {
+    const source_ids = filter orelse return true;
+    if (source_ids.len == 0) return true;
+    var lines = std.mem.splitScalar(u8, source_ids, '\n');
+    while (lines.next()) |source_id| {
+        if (source_id.len == 0 or !isKnownProviderId(source_id)) return false;
+    }
+    return true;
+}
+
+fn validCacheKey(key: []const u8) bool {
+    if (key.len == 0 or key.len > 128) return false;
+    for (key) |character| {
+        if (!std.ascii.isAlphanumeric(character) and
+            character != '-' and character != '_') return false;
+    }
+    return true;
+}
+
+fn isKnownProviderId(provider_id: []const u8) bool {
+    inline for (std.meta.fields(live_refresh.Kind)) |field| {
+        const kind: live_refresh.Kind = @enumFromInt(field.value);
+        if (std.mem.eql(u8, provider_id, liveProviderId(kind))) return true;
+    }
+    return std.mem.eql(u8, provider_id, "codex") or
+        std.mem.eql(u8, provider_id, "claude") or
+        std.mem.eql(u8, provider_id, "opencode");
+}
+
 fn isKnownSetting(key: []const u8) bool {
     return inline for (.{
         "digitalocean.token",
-        "ovh.endpoint",
-        "ovh.application-key",
-        "ovh.application-secret",
-        "ovh.consumer-key",
-        "ovh.project-id",
         "hetzner.token",
         "cloudflare.token",
         "cloudflare.account-id",
@@ -1055,6 +1346,8 @@ fn isKnownSetting(key: []const u8) bool {
         "github.token",
         "github.organization",
         "cursor.admin-key",
+        "codex.home",
+        "codex.account-id",
     }) |known| {
         if (std.mem.eql(u8, key, known)) break true;
     } else false;
@@ -1063,11 +1356,6 @@ fn isKnownSetting(key: []const u8) bool {
 fn credentialJSONName(key: []const u8) ?[]const u8 {
     const names = .{
         .{ "digitalocean.token", "digitalOceanToken" },
-        .{ "ovh.endpoint", "ovhEndpoint" },
-        .{ "ovh.application-key", "ovhApplicationKey" },
-        .{ "ovh.application-secret", "ovhApplicationSecret" },
-        .{ "ovh.consumer-key", "ovhConsumerKey" },
-        .{ "ovh.project-id", "ovhProjectID" },
         .{ "hetzner.token", "hetznerToken" },
         .{ "cloudflare.token", "cloudflareToken" },
         .{ "cloudflare.account-id", "cloudflareAccountID" },
@@ -1131,14 +1419,16 @@ const LocalUsageWindowDefinition = struct {
     id: []const u8,
     label: []const u8,
     duration_seconds: i64,
+    chart_bucket_count: usize,
 };
 
 const local_usage_window_definitions = [_]LocalUsageWindowDefinition{
-    .{ .id = "hour", .label = "Last hour", .duration_seconds = std.time.s_per_hour },
-    .{ .id = "day", .label = "Last 24 hours", .duration_seconds = std.time.s_per_day },
-    .{ .id = "week", .label = "Last 7 days", .duration_seconds = 7 * std.time.s_per_day },
-    .{ .id = "thirty-days", .label = "Last 30 days", .duration_seconds = 30 * std.time.s_per_day },
+    .{ .id = "hour", .label = "Last hour", .duration_seconds = std.time.s_per_hour, .chart_bucket_count = 12 },
+    .{ .id = "day", .label = "Last 24 hours", .duration_seconds = std.time.s_per_day, .chart_bucket_count = 24 },
+    .{ .id = "week", .label = "Last 7 days", .duration_seconds = 7 * std.time.s_per_day, .chart_bucket_count = 7 },
+    .{ .id = "thirty-days", .label = "Last 30 days", .duration_seconds = 30 * std.time.s_per_day, .chart_bucket_count = 30 },
 };
+const max_local_usage_buckets = 32;
 
 fn localUsagePeriod(now: i64, duration_seconds: i64) model.Period {
     return .{
@@ -1178,18 +1468,98 @@ fn collectUsageWindows(
     return output;
 }
 
+fn collectUsageSeries(
+    comptime ProviderType: type,
+    collector: anytype,
+    selected_period: model.Period,
+    now: i64,
+    output: *[local_usage_window_definitions.len + 1]ProviderType.UsageSeries,
+    bucket_storage: *[local_usage_window_definitions.len + 1][max_local_usage_buckets]ProviderType.UsageBucket,
+) ![]const ProviderType.UsageSeries {
+    const month_bucket_count = @max(
+        1,
+        @min(
+            max_local_usage_buckets,
+            @as(usize, @intCast(@divFloor(
+                selected_period.end_exclusive_unix - selected_period.start_unix +
+                    std.time.s_per_day / 2,
+                std.time.s_per_day,
+            ))),
+        ),
+    );
+    try collectUsageSeriesPeriod(
+        ProviderType,
+        collector,
+        "month",
+        "This month",
+        selected_period,
+        month_bucket_count,
+        &output[0],
+        &bucket_storage[0],
+    );
+
+    for (local_usage_window_definitions, 0..) |definition, index| {
+        try collectUsageSeriesPeriod(
+            ProviderType,
+            collector,
+            definition.id,
+            definition.label,
+            localUsagePeriod(now, definition.duration_seconds),
+            definition.chart_bucket_count,
+            &output[index + 1],
+            &bucket_storage[index + 1],
+        );
+    }
+    return output;
+}
+
+fn collectUsageSeriesPeriod(
+    comptime ProviderType: type,
+    collector: anytype,
+    id: []const u8,
+    label: []const u8,
+    period: model.Period,
+    bucket_count: usize,
+    output: *ProviderType.UsageSeries,
+    buckets: *[max_local_usage_buckets]ProviderType.UsageBucket,
+) !void {
+    var token_buckets: [max_local_usage_buckets]local_usage.Tokens = undefined;
+    try collector.aggregateBuckets(period, token_buckets[0..bucket_count]);
+    const duration = period.end_exclusive_unix - period.start_unix;
+    for (0..bucket_count) |index| {
+        const start_offset = @divFloor(duration * @as(i64, @intCast(index)), @as(i64, @intCast(bucket_count)));
+        const end_offset = @divFloor(duration * @as(i64, @intCast(index + 1)), @as(i64, @intCast(bucket_count)));
+        buckets[index] = .{
+            .period = .{
+                .start_unix = period.start_unix + start_offset,
+                .end_exclusive_unix = period.start_unix + end_offset,
+            },
+            .token_usage = tokenCounts(ProviderType, token_buckets[index]),
+        };
+    }
+    output.* = .{
+        .id = id,
+        .label = label,
+        .period = period,
+        .buckets = buckets[0..bucket_count],
+    };
+}
+
 fn updateCodex(
     provider: *codex.Codex,
     aggregate: local_usage.Aggregate,
     usage_windows: []const codex.Codex.UsageWindow,
+    usage_series: []const codex.Codex.UsageSeries,
+    limits: ?local_usage.Limits,
+    source: []const u8,
     period: model.Period,
     now: i64,
 ) !void {
     var allowances_buffer: [2]codex.Codex.Allowance = undefined;
     var labels: [2][32]u8 = undefined;
     var allowance_count: usize = 0;
-    if (aggregate.limits) |limits| {
-        if (limits.primary) |window| {
+    if (limits) |available| {
+        if (available.primary) |window| {
             allowances_buffer[allowance_count] = allowance(
                 "primary",
                 window,
@@ -1197,7 +1567,7 @@ fn updateCodex(
             );
             allowance_count += 1;
         }
-        if (limits.secondary) |window| {
+        if (available.secondary) |window| {
             allowances_buffer[allowance_count] = allowance(
                 "secondary",
                 window,
@@ -1210,11 +1580,61 @@ fn updateCodex(
         .period = period,
         .token_usage = tokenCounts(codex.Codex, aggregate.tokens),
         .token_usage_windows = usage_windows,
+        .token_usage_series = usage_series,
         .allowance_windows = allowances_buffer[0..allowance_count],
         .models = aggregate.models,
-        .source = "Local Codex sessions",
+        .source = source,
         .updated_at_unix = now,
     });
+}
+
+fn codexHomePath(
+    allocator_value: std.mem.Allocator,
+    settings: std.BufMap,
+    home: []const u8,
+) ![]u8 {
+    if (settings.get("codex.home")) |value| {
+        const configured = std.mem.trim(u8, value, " \t\r\n");
+        if (configured.len > 0) return allocator_value.dupe(u8, configured);
+    }
+    if (std.c.getenv("CODEX_HOME")) |pointer| {
+        const configured = std.mem.trim(u8, std.mem.span(pointer), " \t\r\n");
+        if (configured.len > 0) return allocator_value.dupe(u8, configured);
+    }
+    return std.fs.path.join(allocator_value, &.{ home, ".codex" });
+}
+
+fn refreshCodexHomeRoots(
+    collector: *local_usage.Collector(local_usage.CodexLogAdapter),
+    io: std.Io,
+    home: []const u8,
+    codex_home: []const u8,
+    discovery_period: model.Period,
+) !void {
+    const sessions = try std.fs.path.join(allocator, &.{ codex_home, "sessions" });
+    defer allocator.free(sessions);
+    const archived = try std.fs.path.join(allocator, &.{ codex_home, "archived_sessions" });
+    defer allocator.free(archived);
+    const cache_directory = try std.fs.path.join(allocator, &.{
+        home,
+        "Library/Caches/Costbar/local-usage",
+        local_usage.CodexLogAdapter.cache_namespace,
+    });
+    defer allocator.free(cache_directory);
+    const roots = [_][]const u8{ sessions, archived };
+    try collector.refreshRootsWithCache(
+        io,
+        &roots,
+        discovery_period,
+        cache_directory,
+    );
+}
+
+fn preferredCodexLimits(
+    oauth: ?local_usage.Limits,
+    local: ?local_usage.Limits,
+) ?local_usage.Limits {
+    return oauth orelse local;
 }
 
 fn updateClaude(
@@ -1222,6 +1642,7 @@ fn updateClaude(
     aggregate: local_usage.Aggregate,
     status_limits: ?local_usage.Limits,
     usage_windows: []const claude.Claude.UsageWindow,
+    usage_series: []const claude.Claude.UsageSeries,
     period: model.Period,
     now: i64,
 ) !void {
@@ -1252,6 +1673,7 @@ fn updateClaude(
         .period = period,
         .token_usage = tokenCounts(claude.Claude, aggregate.tokens),
         .token_usage_windows = usage_windows,
+        .token_usage_series = usage_series,
         .allowance_windows = allowances_buffer[0..allowance_count],
         .models = aggregate.models,
         .source = "Local Claude Code sessions",
@@ -1316,7 +1738,7 @@ test "C API has no fabricated provider data before the first refresh" {
     defer parsed.deinit();
 
     const root = parsed.value.object;
-    try std.testing.expectEqual(@as(usize, 15), root.get("providers").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 14), root.get("providers").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 0), root.get("totals").?.array.items.len);
     const providers = root.get("providers").?.array.items;
     try std.testing.expectEqualStrings(
@@ -1337,11 +1759,112 @@ test "C refresh with no configured providers performs no work" {
         .track_claude = 0,
         .track_opencode = 0,
         .use_github_cli = 0,
+        .has_source_filter = 0,
+        .source_ids = .{},
     }, &result));
     defer costbar_bytes_free(result.errors);
     try std.testing.expectEqual(@as(u32, 0), result.configured_count);
     try std.testing.expectEqual(@as(u32, 0), result.refreshed_count);
     try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+}
+
+test "C refresh limits work to the selected source IDs" {
+    const core = costbar_core_create() orelse return error.OutOfMemory;
+    defer costbar_core_destroy(core);
+    try std.testing.expectEqual(Status.ok, costbar_core_set_setting(
+        core,
+        bytesView("digitalocean.token"),
+        bytesView("configured"),
+    ));
+
+    var result: RefreshResult = .{};
+    try std.testing.expectEqual(Status.ok, costbar_core_refresh(core, .{
+        .period_start_unix = 1,
+        .period_end_exclusive_unix = 2,
+        .track_codex = 0,
+        .track_claude = 0,
+        .track_opencode = 0,
+        .use_github_cli = 0,
+        .has_source_filter = 1,
+        .source_ids = bytesView("hetzner"),
+    }, &result));
+    defer costbar_bytes_free(result.errors);
+    try std.testing.expectEqual(@as(u32, 0), result.configured_count);
+    try std.testing.expectEqual(@as(u32, 0), result.refreshed_count);
+
+    try std.testing.expectEqual(Status.invalid_argument, costbar_core_refresh(core, .{
+        .period_start_unix = 1,
+        .period_end_exclusive_unix = 2,
+        .track_codex = 0,
+        .track_claude = 0,
+        .track_opencode = 0,
+        .use_github_cli = 0,
+        .has_source_filter = 1,
+        .source_ids = bytesView("unknown-source"),
+    }, &result));
+}
+
+test "source filters support all, subsets, and an explicit empty set" {
+    try std.testing.expect(sourceIsSelected(null, "digitalocean"));
+    try std.testing.expect(sourceIsSelected("hetzner\ncodex", "hetzner"));
+    try std.testing.expect(sourceIsSelected("hetzner\ncodex", "codex"));
+    try std.testing.expect(!sourceIsSelected("hetzner\ncodex", "digitalocean"));
+    try std.testing.expect(!sourceIsSelected("", "hetzner"));
+    try std.testing.expect(validSourceFilter("hetzner\ncodex"));
+    try std.testing.expect(!validSourceFilter("hetzner\n"));
+    try std.testing.expect(!validSourceFilter("not-a-provider"));
+}
+
+test "account cache keys cannot escape their cache directory" {
+    try std.testing.expect(validCacheKey("local-v1"));
+    try std.testing.expect(validCacheKey("f253d2de-79dc-4614-a0c9-91ee13119006"));
+    try std.testing.expect(!validCacheKey(""));
+    try std.testing.expect(!validCacheKey("../dashboard"));
+    try std.testing.expect(!validCacheKey("account/name"));
+}
+
+test "Codex account settings accept isolated homes and workspace IDs" {
+    const core = costbar_core_create() orelse return error.OutOfMemory;
+    defer costbar_core_destroy(core);
+
+    try std.testing.expectEqual(Status.ok, costbar_core_set_setting(
+        core,
+        bytesView("codex.home"),
+        bytesView("/tmp/costbar-managed-codex"),
+    ));
+    try std.testing.expectEqual(Status.ok, costbar_core_set_setting(
+        core,
+        bytesView("codex.account-id"),
+        bytesView("workspace-polymath"),
+    ));
+    try std.testing.expectEqualStrings(
+        "/tmp/costbar-managed-codex",
+        core.settings.get("codex.home").?,
+    );
+    try std.testing.expectEqualStrings(
+        "workspace-polymath",
+        core.settings.get("codex.account-id").?,
+    );
+}
+
+test "Codex OAuth quota is preferred and local quota remains the fallback" {
+    const local = local_usage.Limits{
+        .timestamp = 1,
+        .primary = .{ .used_percent = 80 },
+    };
+    const oauth = local_usage.Limits{
+        .timestamp = 2,
+        .primary = .{ .used_percent = 20 },
+    };
+
+    try std.testing.expectEqual(
+        @as(f64, 20),
+        preferredCodexLimits(oauth, local).?.primary.?.used_percent,
+    );
+    try std.testing.expectEqual(
+        @as(f64, 80),
+        preferredCodexLimits(null, local).?.primary.?.used_percent,
+    );
 }
 
 test "C snapshots distinguish configured providers from setup omissions" {
@@ -1368,10 +1891,13 @@ test "C snapshots distinguish configured providers from setup omissions" {
     try std.testing.expectEqualStrings("unavailable", summary.get("status").?.string);
     try std.testing.expectEqualStrings("NotFetched", summary.get("error_message").?.string);
 
-    const ovh_report = try providerObject(parsed.value, "ovh");
-    const ovh_summary = ovh_report.get("summary").?.object;
-    try std.testing.expectEqualStrings("not_configured", ovh_summary.get("status").?.string);
-    try std.testing.expectEqual(std.json.Value.null, ovh_summary.get("error_message").?);
+    const cloudflare_report = try providerObject(parsed.value, "cloudflare");
+    const cloudflare_summary = cloudflare_report.get("summary").?.object;
+    try std.testing.expectEqualStrings(
+        "not_configured",
+        cloudflare_summary.get("status").?.string,
+    );
+    try std.testing.expectEqual(std.json.Value.null, cloudflare_summary.get("error_message").?);
 }
 
 test "legacy credential JSON is decoded only inside Zig" {
@@ -1465,6 +1991,54 @@ test "C API ingests a Runpod billing snapshot" {
         @as(i64, 25_500_000),
         runpod_report.get("summary").?.object.get("credit_remaining_micros").?.integer,
     );
+}
+
+test "typed C snapshot exposes OpenRouter daily spend" {
+    const core = costbar_core_create() orelse return error.OutOfMemory;
+    defer costbar_core_destroy(core);
+    const document =
+        \\{"key":{"data":{"usage_monthly":3}},"activity_period":{"start_unix":1785535200,"end_exclusive_unix":1788213600},"activity":{"data":[{"date":"2026-08-10","model":"test","usage":1.25,"tokens_prompt":123}]}}
+    ;
+    try std.testing.expectEqual(Status.ok, costbar_core_ingest_provider_json(
+        core,
+        bytesView("openrouter"),
+        bytesView("snapshot"),
+        bytesView(document),
+        100,
+    ));
+
+    var snapshot: ?*Snapshot = null;
+    try std.testing.expectEqual(Status.ok, costbar_core_snapshot_create(
+        core,
+        1785535200,
+        1788213600,
+        &snapshot,
+    ));
+    defer costbar_snapshot_destroy(snapshot);
+    var provider: ProviderView = undefined;
+    try std.testing.expectEqual(Status.ok, costbar_snapshot_provider(snapshot, 5, &provider));
+    try std.testing.expectEqualStrings("openrouter", provider.id.ptr.?[0..provider.id.len]);
+    try std.testing.expectEqual(@as(usize, 1), provider.spend_series_count);
+
+    var series: SpendSeriesView = undefined;
+    try std.testing.expectEqual(Status.ok, costbar_snapshot_spend_series(
+        snapshot,
+        5,
+        0,
+        &series,
+    ));
+    try std.testing.expectEqualStrings("test", series.id.ptr.?[0..series.id.len]);
+    try std.testing.expectEqual(@as(usize, 1), series.bucket_count);
+    var bucket: SpendBucketView = undefined;
+    try std.testing.expectEqual(Status.ok, costbar_snapshot_spend_bucket(
+        snapshot,
+        5,
+        0,
+        0,
+        &bucket,
+    ));
+    try std.testing.expectEqual(@as(i64, 1_250_000), bucket.amount_micros);
+    try std.testing.expectEqual(@as(u64, 123), bucket.usage_quantity);
 }
 
 test "C API ingests Vercel FOCUS billing charges" {

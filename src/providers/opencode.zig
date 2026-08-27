@@ -28,6 +28,7 @@ const OwnedUsage = struct {
     arena: std.heap.ArenaAllocator,
     period: model.Period,
     models: []ModelUsage,
+    buckets: []model.TokenUsageBucket,
     updated_at_unix: i64,
 
     fn deinit(self: *OwnedUsage) void {
@@ -155,6 +156,16 @@ pub const OpenCode = struct {
         errdefer allocator.free(resources);
         const line_items = try allocator.alloc(model.CostLineItem, usage.models.len);
         errdefer allocator.free(line_items);
+        const history_buckets = try allocator.dupe(model.TokenUsageBucket, usage.buckets);
+        errdefer allocator.free(history_buckets);
+        const token_usage_series = try allocator.alloc(model.TokenUsageSeries, 1);
+        errdefer allocator.free(token_usage_series);
+        token_usage_series[0] = .{
+            .id = "month",
+            .label = "This month",
+            .period = usage.period,
+            .buckets = history_buckets,
+        };
         var current: i64 = 0;
         var tokens = model.TokenUsage{
             .period = usage.period,
@@ -200,14 +211,16 @@ pub const OpenCode = struct {
             .resources = resources,
             .line_items = line_items,
             .token_usage = tokens,
+            .token_usage_series = token_usage_series,
         };
     }
 };
 
 const database_relative_path = ".local/share/opencode/opencode.db";
 const cache_relative_directory = "Library/Caches/Costbar/local-usage/opencode-v1";
-const cache_version: u32 = 1;
+const cache_version: u32 = 2;
 const max_cache_bytes = 8 * 1024 * 1024;
+const max_history_buckets = 31;
 
 /// Everything that has to be unchanged for a cached CLI answer to still be the
 /// right answer. These are SQLite's own write markers rather than file
@@ -418,10 +431,14 @@ fn usageQuery(allocator: std.mem.Allocator, period: model.Period) ![]u8 {
         return error.InvalidPeriod;
     const end_millis = std.math.mul(i64, period.end_exclusive_unix, 1000) catch
         return error.InvalidPeriod;
+    const duration_millis = std.math.sub(i64, end_millis, start_millis) catch
+        return error.InvalidPeriod;
+    const bucket_count = historyBucketCount(period);
     return std.fmt.allocPrint(allocator,
         \\SELECT
         \\ COALESCE(json_extract(data, '$.providerID'), 'unknown') AS provider,
         \\ COALESCE(json_extract(data, '$.modelID'), 'unknown') AS model,
+        \\ CAST(((time_created - {d}) * {d}) / {d} AS INTEGER) AS bucket,
         \\ SUM(COALESCE(json_extract(data, '$.cost'), 0)) AS cost,
         \\ SUM(COALESCE(json_extract(data, '$.tokens.input'), 0)) AS input,
         \\ SUM(COALESCE(json_extract(data, '$.tokens.output'), 0)) AS output,
@@ -432,9 +449,9 @@ fn usageQuery(allocator: std.mem.Allocator, period: model.Period) ![]u8 {
         \\WHERE json_extract(data, '$.role') = 'assistant'
         \\ AND time_created >= {d}
         \\ AND time_created < {d}
-        \\GROUP BY provider, model
-        \\ORDER BY cost DESC, provider ASC, model ASC
-    , .{ start_millis, end_millis });
+        \\GROUP BY provider, model, bucket
+        \\ORDER BY bucket ASC, cost DESC, provider ASC, model ASC
+    , .{ start_millis, bucket_count, duration_millis, start_millis, end_millis });
 }
 
 fn runQuery(
@@ -480,6 +497,7 @@ fn parseUsage(
         .arena = .init(allocator),
         .period = undefined,
         .models = &.{},
+        .buckets = &.{},
         .updated_at_unix = received_at_unix,
     };
     errdefer result.deinit();
@@ -491,6 +509,27 @@ fn parseUsage(
     const root = try object(value);
     result.period = try parsePeriod(root.get("period") orelse return error.InvalidResponse);
     const rows = try array(root.get("rows") orelse return error.InvalidResponse);
+    const bucket_count = historyBucketCount(result.period);
+    const duration = std.math.sub(
+        i64,
+        result.period.end_exclusive_unix,
+        result.period.start_unix,
+    ) catch return error.InvalidPeriod;
+    const buckets = try arena.alloc(model.TokenUsageBucket, bucket_count);
+    for (buckets, 0..) |*bucket, index| {
+        const start_offset: i64 = @intCast(@divFloor(
+            @as(i128, duration) * @as(i128, @intCast(index)),
+            @as(i128, @intCast(bucket_count)),
+        ));
+        const end_offset: i64 = @intCast(@divFloor(
+            @as(i128, duration) * @as(i128, @intCast(index + 1)),
+            @as(i128, @intCast(bucket_count)),
+        ));
+        bucket.* = .{ .period = .{
+            .start_unix = result.period.start_unix + start_offset,
+            .end_exclusive_unix = result.period.start_unix + end_offset,
+        } };
+    }
     var models: std.ArrayList(ModelUsage) = .empty;
     for (rows.items) |row_value| {
         const row = try object(row_value);
@@ -501,27 +540,61 @@ fn parseUsage(
         const reasoning = try optionalU64(row.get("reasoning")) orelse 0;
         const cache_read = try optionalU64(row.get("cache_read")) orelse 0;
         const cache_write = try optionalU64(row.get("cache_write")) orelse 0;
-        var total_tokens = input;
-        total_tokens +|= output;
-        total_tokens +|= reasoning;
-        total_tokens +|= cache_read;
-        total_tokens +|= cache_write;
-        try models.append(arena, .{
-            .id = try std.fmt.allocPrint(arena, "{s}/{s}", .{ provider, model_name }),
-            .provider = provider,
-            .model = model_name,
-            .amount_micros = try optionalMoney(row.get("cost")) orelse 0,
-            .input = input,
-            .output = output,
-            .reasoning = reasoning,
-            .cache_read = cache_read,
-            .cache_write = cache_write,
-            .detail = try std.fmt.allocPrint(arena, "{d} tokens", .{total_tokens}),
-        });
+        const amount_micros = try optionalMoney(row.get("cost")) orelse 0;
+        const bucket_index = try optionalU64(row.get("bucket")) orelse 0;
+        if (bucket_index >= buckets.len) return error.InvalidResponse;
+        const bucket = &buckets[@intCast(bucket_index)];
+        bucket.input_tokens +|= input;
+        bucket.output_tokens +|= output;
+        bucket.reasoning_tokens +|= reasoning;
+        bucket.cache_read_tokens +|= cache_read;
+        bucket.cache_creation_tokens +|= cache_write;
+
+        const entry = for (models.items) |*candidate| {
+            if (std.mem.eql(u8, candidate.provider, provider) and
+                std.mem.eql(u8, candidate.model, model_name))
+            {
+                break candidate;
+            }
+        } else blk: {
+            try models.append(arena, .{
+                .id = try std.fmt.allocPrint(arena, "{s}/{s}", .{ provider, model_name }),
+                .provider = provider,
+                .model = model_name,
+                .amount_micros = 0,
+                .input = 0,
+                .output = 0,
+                .reasoning = 0,
+                .cache_read = 0,
+                .cache_write = 0,
+                .detail = "",
+            });
+            break :blk &models.items[models.items.len - 1];
+        };
+        entry.amount_micros = std.math.add(i64, entry.amount_micros, amount_micros) catch
+            return error.AmountOverflow;
+        entry.input +|= input;
+        entry.output +|= output;
+        entry.reasoning +|= reasoning;
+        entry.cache_read +|= cache_read;
+        entry.cache_write +|= cache_write;
     }
     result.models = try models.toOwnedSlice(arena);
+    for (result.models) |*entry| {
+        entry.detail = try std.fmt.allocPrint(arena, "{d} tokens", .{entry.totalTokens()});
+    }
+    result.buckets = buckets;
     std.mem.sort(ModelUsage, result.models, {}, usageDescending);
     return result;
+}
+
+fn historyBucketCount(period: model.Period) usize {
+    const duration: u64 = @intCast(@as(i128, period.end_exclusive_unix) - period.start_unix);
+    const rounded_days = @max(
+        1,
+        (duration +| @as(u64, std.time.s_per_day / 2)) / std.time.s_per_day,
+    );
+    return @intCast(@min(max_history_buckets, rounded_days));
 }
 
 fn wrappedPayload(
@@ -600,10 +673,14 @@ fn usageDescending(_: void, left: ModelUsage, right: ModelUsage) bool {
 }
 
 test "OpenCode parses exact local cost and token metadata" {
-    const period = model.Period{ .start_unix = 1, .end_exclusive_unix = 200 };
+    const period = model.Period{
+        .start_unix = 0,
+        .end_exclusive_unix = 3 * std.time.s_per_day,
+    };
     const rows =
-        \\[{"provider":"opencode-go","model":"kimi","cost":0,"input":100,"output":20,"reasoning":5,"cache_read":40,"cache_write":2},
-        \\ {"provider":"openrouter","model":"grok","cost":1.25,"input":10,"output":3,"reasoning":0,"cache_read":0,"cache_write":0}]
+        \\[{"provider":"opencode-go","model":"kimi","bucket":0,"cost":0,"input":100,"output":20,"reasoning":5,"cache_read":40,"cache_write":2},
+        \\ {"provider":"openrouter","model":"grok","bucket":0,"cost":1,"input":4,"output":1,"reasoning":0,"cache_read":0,"cache_write":0},
+        \\ {"provider":"openrouter","model":"grok","bucket":2,"cost":0.25,"input":6,"output":2,"reasoning":0,"cache_read":0,"cache_write":0}]
     ;
     const payload = try wrappedPayload(std.testing.allocator, period, rows);
     defer std.testing.allocator.free(payload);
@@ -617,6 +694,14 @@ test "OpenCode parses exact local cost and token metadata" {
     try std.testing.expectEqual(@as(u64, 110), report.token_usage.?.input_tokens);
     try std.testing.expectEqual(@as(u64, 40), report.token_usage.?.cache_read_tokens);
     try std.testing.expectEqualStrings("openrouter/grok", report.resources[0].id);
+    try std.testing.expectEqual(@as(usize, 2), report.resources.len);
+    try std.testing.expectEqual(@as(usize, 1), report.token_usage_series.len);
+    const series = report.token_usage_series[0];
+    try std.testing.expectEqualStrings("month", series.id);
+    try std.testing.expectEqual(@as(usize, 3), series.buckets.len);
+    try std.testing.expectEqual(@as(u64, 104), series.buckets[0].input_tokens);
+    try std.testing.expectEqual(@as(u64, 0), series.buckets[1].total());
+    try std.testing.expectEqual(@as(u64, 8), series.buckets[2].total());
 }
 
 test "OpenCode SQL query is period-bounded and selects no content" {
@@ -627,6 +712,8 @@ test "OpenCode SQL query is period-bounded and selects no content" {
     defer std.testing.allocator.free(query);
     try std.testing.expect(std.mem.indexOf(u8, query, "time_created >= 10000") != null);
     try std.testing.expect(std.mem.indexOf(u8, query, "time_created < 20000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, query, "AS bucket") != null);
+    try std.testing.expect(std.mem.indexOf(u8, query, "GROUP BY provider, model, bucket") != null);
     try std.testing.expect(std.mem.indexOf(u8, query, "prompt") == null);
     try std.testing.expect(std.mem.indexOf(u8, query, "parts") == null);
 }
@@ -656,9 +743,7 @@ test "OpenCode reuses a cached query only while the database is unchanged" {
     const cache_file = (try cachePath(allocator, io, home, database)).?;
     defer allocator.free(cache_file);
 
-    const payload = try wrappedPayload(
-        allocator,
-        period,
+    const payload = try wrappedPayload(allocator, period,
         \\[{"provider":"openrouter","model":"grok","cost":1.25,"input":10}]
     );
     defer allocator.free(payload);
@@ -778,9 +863,7 @@ test "OpenCode falls back to the last cached answer when the CLI fails" {
 
     const cache_file = (try cachePath(allocator, io, home, database)).?;
     defer allocator.free(cache_file);
-    const payload = try wrappedPayload(
-        allocator,
-        period,
+    const payload = try wrappedPayload(allocator, period,
         \\[{"provider":"openrouter","model":"grok","cost":2.50}]
     );
     defer allocator.free(payload);

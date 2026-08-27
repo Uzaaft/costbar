@@ -345,7 +345,56 @@ pub fn Collector(comptime Adapter: type) type {
             result.models = try models.toOwnedSlice(arena);
             return result;
         }
+
+        /// Aggregates one period into evenly sized buckets in a single pass.
+        /// Empty buckets are retained so a chart shows idle time instead of
+        /// visually joining activity across a gap.
+        pub fn aggregateBuckets(
+            self: *Self,
+            period: model.Period,
+            output: []Tokens,
+        ) !void {
+            try period.validate();
+            if (output.len == 0) return;
+            @memset(output, .{});
+
+            var deduped: std.HashMapUnmanaged(
+                DedupeKey,
+                UsageSample,
+                DedupeContext,
+                80,
+            ) = .empty;
+            defer deduped.deinit(self.allocator);
+
+            var iterator = self.entries.iterator();
+            while (iterator.next()) |item| {
+                const entry = item.value_ptr;
+                if (entry.seen_generation != self.generation) continue;
+                for (entry.scan.samples) |sample| {
+                    if (sample.dedupe_key) |key| {
+                        try putLatestSample(self.allocator, &deduped, key, sample);
+                        continue;
+                    }
+                    if (!contains(period, sample.timestamp)) continue;
+                    addSampleToBucket(period, output, sample);
+                }
+            }
+
+            var deduped_iterator = deduped.valueIterator();
+            while (deduped_iterator.next()) |sample| {
+                if (!contains(period, sample.timestamp)) continue;
+                addSampleToBucket(period, output, sample.*);
+            }
+        }
     };
+}
+
+fn addSampleToBucket(period: model.Period, output: []Tokens, sample: UsageSample) void {
+    const elapsed: u64 = @intCast(sample.timestamp - period.start_unix);
+    const duration: u64 = @intCast(period.end_exclusive_unix - period.start_unix);
+    const scaled = @as(u128, elapsed) * @as(u128, output.len);
+    const index: usize = @intCast(@min(scaled / duration, output.len - 1));
+    output[index].add(sample.tokens);
 }
 
 fn loadPersistentCache(
@@ -1056,6 +1105,36 @@ test "one cached history can aggregate multiple periods" {
 
     try std.testing.expectEqual(@as(u64, 120), before.tokens.input + before.tokens.output);
     try std.testing.expectEqual(@as(u64, 60), after.tokens.input + after.tokens.output);
+}
+
+test "collector keeps empty token history buckets" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var root_buffer: [std.fs.max_path_bytes]u8 = undefined;
+    const root_length = try tmp.dir.realPath(std.testing.io, &root_buffer);
+    const root = root_buffer[0..root_length];
+    const source_path = try std.fs.path.join(std.testing.allocator, &.{ root, "usage.jsonl" });
+    defer std.testing.allocator.free(source_path);
+    try std.Io.Dir.writeFile(.cwd(), std.testing.io, .{
+        .sub_path = source_path,
+        .data =
+        \\{"timestamp":10,"payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10}}}}
+        \\{"timestamp":110,"payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":20}}}}
+        \\{"timestamp":310,"payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":40}}}}
+        ,
+    });
+
+    var collector = Collector(CodexLogAdapter).init(std.testing.allocator);
+    defer collector.deinit();
+    const period = model.Period{ .start_unix = 0, .end_exclusive_unix = 400 };
+    try collector.refreshRoots(std.testing.io, &.{root}, period);
+    var buckets: [4]Tokens = undefined;
+    try collector.aggregateBuckets(period, &buckets);
+
+    try std.testing.expectEqual(@as(u64, 10), buckets[0].input);
+    try std.testing.expectEqual(@as(u64, 20), buckets[1].input);
+    try std.testing.expectEqual(@as(u64, 0), buckets[2].input);
+    try std.testing.expectEqual(@as(u64, 40), buckets[3].input);
 }
 
 test "Claude JSONL scan sums assistant usage only" {

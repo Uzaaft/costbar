@@ -7,6 +7,7 @@ enum CostbarCoreError: Error, LocalizedError {
     case snapshotFailed(costbar_status_t)
     case settingFailed(key: String, status: costbar_status_t)
     case refreshFailed(costbar_status_t)
+    case githubCLIOrganizationDiscoveryFailed(costbar_status_t)
     case missingPayload
 
     var errorDescription: String? {
@@ -21,9 +22,28 @@ enum CostbarCoreError: Error, LocalizedError {
             "Could not configure \(key) (status \(status.rawValue))."
         case let .refreshFailed(status):
             "Could not refresh the Zig core (status \(status.rawValue))."
+        case let .githubCLIOrganizationDiscoveryFailed(status):
+            "Could not read organizations from GitHub CLI (status \(status.rawValue))."
         case .missingPayload:
             "The Costbar core returned an empty snapshot."
         }
+    }
+}
+
+/// One refresh pass through the Zig core.
+struct CoreRefreshRequest: Sendable {
+    let credentials: ProviderCredentials
+    let period: Dashboard.Period
+    let trackedLocalSources: Set<LocalSource>
+    let useGitHubCLI: Bool
+    let codexHome: String?
+    let codexAccountID: String?
+    let sourceIDs: Set<String>?
+    let writesCache: Bool
+    let cacheKey: String?
+
+    func tracks(_ source: LocalSource) -> UInt8 {
+        trackedLocalSources.contains(source) ? 1 : 0
     }
 }
 
@@ -55,6 +75,23 @@ final class CostbarCore: @unchecked Sendable {
         costbar_core_destroy(handle)
     }
 
+    static func githubCLIOrganizations() async throws -> [String] {
+        try await Task.detached(priority: .utility) {
+            var value = costbar_bytes_t(ptr: nil, len: 0)
+            let status = costbar_github_cli_organizations(&value)
+            guard status == COSTBAR_STATUS_OK else {
+                throw CostbarCoreError.githubCLIOrganizationDiscoveryFailed(status)
+            }
+            defer { costbar_bytes_free(value) }
+            guard let pointer = value.ptr else { return [] }
+            let raw = String(
+                bytes: UnsafeBufferPointer(start: pointer, count: value.len),
+                encoding: .utf8
+            ) ?? ""
+            return raw.split(whereSeparator: \.isNewline).map(String.init)
+        }.value
+    }
+
     func snapshot(period: Dashboard.Period) throws -> Dashboard {
         lock.lock()
         defer { lock.unlock() }
@@ -74,17 +111,34 @@ final class CostbarCore: @unchecked Sendable {
         return try Dashboard(snapshot: snapshot)
     }
 
-    func cachedSnapshot(period: Dashboard.Period) throws -> Dashboard? {
+    func cachedSnapshot(
+        period: Dashboard.Period,
+        cacheKey: String? = nil
+    ) throws -> Dashboard? {
         lock.lock()
         defer { lock.unlock() }
 
         var snapshot: OpaquePointer?
-        let status = costbar_core_cached_snapshot_create(
-            handle,
-            period.startUnix,
-            period.endExclusiveUnix,
-            &snapshot
-        )
+        let status: costbar_status_t
+        if let cacheKey {
+            let key = Data(cacheKey.utf8)
+            status = key.withUnsafeBytes { buffer in
+                costbar_core_cached_account_snapshot_create(
+                    handle,
+                    buffer.costbarBytes,
+                    period.startUnix,
+                    period.endExclusiveUnix,
+                    &snapshot
+                )
+            }
+        } else {
+            status = costbar_core_cached_snapshot_create(
+                handle,
+                period.startUnix,
+                period.endExclusiveUnix,
+                &snapshot
+            )
+        }
         if status == COSTBAR_STATUS_UNSUPPORTED { return nil }
         guard status == COSTBAR_STATUS_OK else {
             throw CostbarCoreError.snapshotFailed(status)
@@ -94,38 +148,21 @@ final class CostbarCore: @unchecked Sendable {
         return try Dashboard(snapshot: snapshot)
     }
 
-    func refresh(
-        credentials: ProviderCredentials,
-        period: Dashboard.Period,
-        trackCodex: Bool,
-        trackClaude: Bool,
-        trackOpenCode: Bool,
-        useGitHubCLI: Bool
-    ) async throws -> RefreshReport {
+    func refresh(_ request: CoreRefreshRequest) async throws -> RefreshReport {
         try await Task.detached(priority: .utility) { [self] in
-            try refreshSynchronously(
-                credentials: credentials,
-                period: period,
-                trackCodex: trackCodex,
-                trackClaude: trackClaude,
-                trackOpenCode: trackOpenCode,
-                useGitHubCLI: useGitHubCLI
-            )
+            try refreshSynchronously(request)
         }.value
     }
 
-    private func refreshSynchronously(
-        credentials: ProviderCredentials,
-        period: Dashboard.Period,
-        trackCodex: Bool,
-        trackClaude: Bool,
-        trackOpenCode: Bool,
-        useGitHubCLI: Bool
-    ) throws -> RefreshReport {
+    private func refreshSynchronously(_ request: CoreRefreshRequest) throws -> RefreshReport {
         lock.lock()
         defer { lock.unlock() }
 
-        for (key, value) in credentials.coreSettings {
+        let settings = request.credentials.coreSettings + [
+            ("codex.home", request.codexHome),
+            ("codex.account-id", request.codexAccountID),
+        ]
+        for (key, value) in settings {
             let keyData = Data(key.utf8)
             let valueData = Data((value ?? "").utf8)
             let status = keyData.withUnsafeBytes { keyBuffer in
@@ -147,18 +184,29 @@ final class CostbarCore: @unchecked Sendable {
             refreshed_count: 0,
             errors: costbar_bytes_t(ptr: nil, len: 0)
         )
-        let status = costbar_core_refresh(
-            handle,
-            costbar_refresh_options_t(
-                period_start_unix: period.startUnix,
-                period_end_exclusive_unix: period.endExclusiveUnix,
-                track_codex: trackCodex ? 1 : 0,
-                track_claude: trackClaude ? 1 : 0,
-                track_opencode: trackOpenCode ? 1 : 0,
-                use_github_cli: useGitHubCLI ? 1 : 0
-            ),
-            &result
-        )
+        let sourceList = request.sourceIDs?.sorted().joined(separator: "\n") ?? ""
+        let sourceData = Data(sourceList.utf8)
+        let cacheKeyData = Data((request.cacheKey ?? "").utf8)
+        let status = sourceData.withUnsafeBytes { sourceBuffer in
+            cacheKeyData.withUnsafeBytes { cacheKeyBuffer in
+                costbar_core_refresh(
+                    handle,
+                    costbar_refresh_options_t(
+                        period_start_unix: request.period.startUnix,
+                        period_end_exclusive_unix: request.period.endExclusiveUnix,
+                        track_codex: request.tracks(.codex),
+                        track_claude: request.tracks(.claude),
+                        track_opencode: request.tracks(.opencode),
+                        use_github_cli: request.useGitHubCLI ? 1 : 0,
+                        has_source_filter: request.sourceIDs == nil ? 0 : 1,
+                        write_cache: request.writesCache ? 1 : 0,
+                        source_ids: sourceBuffer.costbarBytes,
+                        cache_key: cacheKeyBuffer.costbarBytes
+                    ),
+                    &result
+                )
+            }
+        }
         guard status == COSTBAR_STATUS_OK else {
             throw CostbarCoreError.refreshFailed(status)
         }
@@ -177,210 +225,6 @@ final class CostbarCore: @unchecked Sendable {
     }
 }
 
-private extension Dashboard {
-    init(snapshot: OpaquePointer) throws {
-        var header = costbar_snapshot_header_t()
-        try check(costbar_snapshot_header(snapshot, &header))
-
-        let totals = try (0..<Int(header.total_count)).map { index in
-            var value = costbar_currency_total_view_t()
-            try check(costbar_snapshot_total(snapshot, index, &value))
-            return CurrencyTotal(
-                currency: value.currency.string,
-                currentCostMicros: value.current_cost_micros,
-                projectedCostMicros: value.projected_cost_micros.optional,
-                creditRemainingMicros: value.credit_remaining_micros.optional,
-                projectionComplete: value.projection_complete != 0,
-                creditComplete: value.credit_complete != 0
-            )
-        }
-        let providers = try (0..<Int(header.provider_count)).map { index in
-            try ProviderReport(snapshot: snapshot, index: index)
-        }
-        self.init(
-            period: .init(
-                startUnix: header.period_start_unix,
-                endExclusiveUnix: header.period_end_exclusive_unix
-            ),
-            generatedAtUnix: header.generated_at_unix,
-            totals: totals,
-            providers: providers
-        )
-    }
-}
-
-private extension Dashboard.ProviderReport {
-    init(snapshot: OpaquePointer, index: Int) throws {
-        var provider = costbar_provider_view_t()
-        try check(costbar_snapshot_provider(snapshot, index, &provider))
-        let resources = try (0..<Int(provider.resource_count)).map { resourceIndex in
-            var value = costbar_resource_view_t()
-            try check(costbar_snapshot_resource(snapshot, index, resourceIndex, &value))
-            return Dashboard.Resource(
-                id: value.id.string,
-                name: value.name.string,
-                kind: value.kind.string,
-                status: value.status.string,
-                quantity: value.quantity
-            )
-        }
-        let lineItems = try (0..<Int(provider.line_item_count)).map { itemIndex in
-            var value = costbar_cost_line_item_view_t()
-            try check(costbar_snapshot_line_item(snapshot, index, itemIndex, &value))
-            return Dashboard.CostLineItem(
-                id: value.id.string,
-                description: value.description.string,
-                service: value.service.string,
-                amountMicros: value.amount_micros,
-                currency: value.has_currency == 0 ? nil : value.currency.string,
-                detail: value.has_detail == 0 ? nil : value.detail.string
-            )
-        }
-        let allowances = try (0..<Int(provider.allowance_count)).map { allowanceIndex in
-            var value = costbar_allowance_view_t()
-            try check(costbar_snapshot_allowance(snapshot, index, allowanceIndex, &value))
-            return Dashboard.AllowanceWindow(
-                id: value.id.string,
-                label: value.label.string,
-                usedPercent: value.used_percent,
-                resetsAtUnix: value.resets_at_unix.optional,
-                detail: value.has_detail == 0 ? nil : value.detail.string
-            )
-        }
-        let tokenUsage: Dashboard.TokenUsage? = if provider.has_token_usage != 0 {
-            try Dashboard.TokenUsage(snapshot: snapshot, providerIndex: index)
-        } else {
-            nil
-        }
-        let tokenUsageWindows = try (0..<Int(provider.token_usage_window_count)).map { windowIndex in
-            try Dashboard.TokenUsageWindow(
-                snapshot: snapshot,
-                providerIndex: index,
-                index: windowIndex
-            )
-        }
-        let financials = try (0..<Int(provider.financial_count)).map { financialIndex in
-            var value = costbar_financial_view_t()
-            try check(costbar_snapshot_financial(snapshot, index, financialIndex, &value))
-            return Dashboard.FinancialSummary(
-                currency: value.currency.string,
-                currentCostMicros: value.current_cost_micros,
-                projectedCostMicros: value.projected_cost_micros.optional,
-                creditRemainingMicros: value.credit_remaining_micros.optional
-            )
-        }
-        self.init(
-            summary: .init(
-                id: provider.id.string,
-                displayName: provider.display_name.string,
-                kind: provider.kind.string,
-                status: .init(rawValue: provider.status.string) ?? .unavailable,
-                errorMessage: provider.has_error_message == 0 ? nil : provider.error_message.string,
-                currency: provider.currency.string,
-                currentCostMicros: provider.current_cost_micros,
-                projectedCostMicros: provider.projected_cost_micros.optional,
-                creditRemainingMicros: provider.credit_remaining_micros.optional,
-                contributesToTotals: provider.contributes_to_totals != 0,
-                updatedAtUnix: provider.updated_at_unix
-            ),
-            resources: resources,
-            lineItems: lineItems,
-            allowanceWindows: allowances,
-            tokenUsage: tokenUsage,
-            tokenUsageWindows: tokenUsageWindows,
-            financials: financials
-        )
-    }
-}
-
-private extension Dashboard.TokenUsage {
-    init(snapshot: OpaquePointer, providerIndex: Int) throws {
-        var value = costbar_token_usage_view_t()
-        try check(costbar_snapshot_token_usage(snapshot, providerIndex, &value))
-        self.init(
-            period: .init(
-                startUnix: value.period_start_unix,
-                endExclusiveUnix: value.period_end_exclusive_unix
-            ),
-            inputTokens: value.input_tokens,
-            outputTokens: value.output_tokens,
-            cacheReadTokens: value.cache_read_tokens,
-            cacheCreationTokens: value.cache_creation_tokens,
-            reasoningTokens: value.reasoning_tokens,
-            source: value.source.string,
-            updatedAtUnix: value.updated_at_unix
-        )
-    }
-}
-
-private extension Dashboard.TokenUsageWindow {
-    init(snapshot: OpaquePointer, providerIndex: Int, index: Int) throws {
-        var value = costbar_token_usage_window_view_t()
-        try check(costbar_snapshot_token_usage_window(snapshot, providerIndex, index, &value))
-        self.init(
-            id: value.id.string,
-            label: value.label.string,
-            period: .init(
-                startUnix: value.period_start_unix,
-                endExclusiveUnix: value.period_end_exclusive_unix
-            ),
-            inputTokens: value.input_tokens,
-            outputTokens: value.output_tokens,
-            cacheReadTokens: value.cache_read_tokens,
-            cacheCreationTokens: value.cache_creation_tokens,
-            reasoningTokens: value.reasoning_tokens
-        )
-    }
-}
-
-private func check(_ status: costbar_status_t) throws {
-    guard status == COSTBAR_STATUS_OK else {
-        throw CostbarCoreError.snapshotFailed(status)
-    }
-}
-
-private extension costbar_bytes_t {
-    var string: String {
-        guard let ptr, len > 0 else { return "" }
-        return String(bytes: UnsafeBufferPointer(start: ptr, count: len), encoding: .utf8) ?? ""
-    }
-}
-
-private extension costbar_optional_i64_t {
-    var optional: Int64? { present == 0 ? nil : value }
-}
-
-private extension ProviderCredentials {
-    var coreSettings: [(String, String?)] {
-        [
-            ("digitalocean.token", digitalOceanToken),
-            ("ovh.endpoint", ovhEndpoint),
-            ("ovh.application-key", ovhApplicationKey),
-            ("ovh.application-secret", ovhApplicationSecret),
-            ("ovh.consumer-key", ovhConsumerKey),
-            ("ovh.project-id", ovhProjectID),
-            ("hetzner.token", hetznerToken),
-            ("cloudflare.token", cloudflareToken),
-            ("cloudflare.account-id", cloudflareAccountID),
-            ("runpod.api-key", runpodAPIKey),
-            ("vercel.token", vercelToken),
-            ("vercel.team", vercelTeamIDOrSlug),
-            ("openrouter.api-key", openRouterAPIKey),
-            ("openrouter.management-key", openRouterManagementKey),
-            ("openai.admin-key", openAIAdminKey),
-            ("anthropic.admin-key", anthropicAdminKey),
-            ("github.token", githubToken),
-            ("github.organization", githubOrganization),
-            ("cursor.admin-key", cursorAdminKey),
-        ]
-    }
-}
-
-private extension UnsafeRawBufferPointer {
-    var costbarBytes: costbar_bytes_t {
-        costbar_bytes_t(
-            ptr: bindMemory(to: UInt8.self).baseAddress,
-            len: count
-        )
-    }
-}
+/// Fans a provider's normal refresh path out across its configured accounts.
+/// Each account gets an isolated core so credential overrides never bleed into
+/// another account's request or cache.

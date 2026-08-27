@@ -2,7 +2,6 @@ const std = @import("std");
 const http = @import("http.zig");
 const model = @import("model.zig");
 const digitalocean = @import("providers/digitalocean.zig");
-const ovh = @import("providers/ovh.zig");
 const hetzner = @import("providers/hetzner.zig");
 const cloudflare = @import("providers/cloudflare.zig");
 const runpod = @import("providers/runpod.zig");
@@ -16,7 +15,6 @@ const cursor = @import("providers/cursor.zig");
 
 pub const Kind = enum {
     digitalocean,
-    ovh,
     hetzner,
     cloudflare,
     runpod,
@@ -31,11 +29,6 @@ pub const Kind = enum {
 
 pub const Credentials = struct {
     digitalocean_token: ?[]const u8 = null,
-    ovh_endpoint: ?[]const u8 = null,
-    ovh_application_key: ?[]const u8 = null,
-    ovh_application_secret: ?[]const u8 = null,
-    ovh_consumer_key: ?[]const u8 = null,
-    ovh_project_id: ?[]const u8 = null,
     hetzner_token: ?[]const u8 = null,
     cloudflare_token: ?[]const u8 = null,
     cloudflare_account_id: ?[]const u8 = null,
@@ -56,11 +49,6 @@ pub const Credentials = struct {
     pub fn isConfigured(self: Credentials, kind: Kind) bool {
         return switch (kind) {
             .digitalocean => nonEmpty(self.digitalocean_token),
-            .ovh => nonEmpty(self.ovh_endpoint) and
-                nonEmpty(self.ovh_application_key) and
-                nonEmpty(self.ovh_application_secret) and
-                nonEmpty(self.ovh_consumer_key) and
-                nonEmpty(self.ovh_project_id),
             .hetzner => nonEmpty(self.hetzner_token),
             .cloudflare => nonEmpty(self.cloudflare_token) and nonEmpty(self.cloudflare_account_id),
             .runpod => nonEmpty(self.runpod_api_key),
@@ -78,7 +66,6 @@ pub const Credentials = struct {
 
 pub const Providers = struct {
     digitalocean: *digitalocean.DigitalOcean,
-    ovh: *ovh.OVHcloud,
     hetzner: *hetzner.Hetzner,
     cloudflare: *cloudflare.Cloudflare,
     runpod: *runpod.Runpod,
@@ -133,18 +120,6 @@ pub fn refreshWithClient(
             allocator,
             client,
             .{ .token = credentials.digitalocean_token.? },
-            now,
-        ),
-        .ovh => try providers.ovh.fetch(
-            allocator,
-            client,
-            .{
-                .endpoint = credentials.ovh_endpoint.?,
-                .application_key = credentials.ovh_application_key.?,
-                .application_secret = credentials.ovh_application_secret.?,
-                .consumer_key = credentials.ovh_consumer_key.?,
-                .project_id = credentials.ovh_project_id.?,
-            },
             now,
         ),
         .hetzner => try providers.hetzner.fetch(
@@ -407,8 +382,8 @@ fn refreshOpenRouter(
 
     var credits: ?[]u8 = null;
     defer if (credits) |body| allocator.free(body);
-    var activity: ?[]u8 = null;
-    defer if (activity) |body| allocator.free(body);
+    var analytics: ?[]u8 = null;
+    defer if (analytics) |body| allocator.free(body);
     if (raw_management_key) |raw| {
         const management_key = std.mem.trim(u8, raw, " \t\r\n");
         if (management_key.len > 0) {
@@ -416,9 +391,27 @@ fn refreshOpenRouter(
                 .url = "https://openrouter.ai/api/v1/credits",
                 .bearer_token = management_key,
             }) catch null;
-            activity = fetch(allocator, client, .{
-                .url = "https://openrouter.ai/api/v1/activity",
+
+            const report_end = reportEnd(period, now);
+            const history_start = report_end -| 30 * std.time.s_per_day;
+            const query_start = @min(period.start_unix, history_start);
+            const start = try iso8601(allocator, query_start, false);
+            defer allocator.free(start);
+            const end = try iso8601(allocator, report_end, false);
+            defer allocator.free(end);
+            const analytics_query = try std.fmt.allocPrint(
+                allocator,
+                "{{\"metrics\":[\"total_usage\",\"tokens_prompt\",\"tokens_completion\",\"reasoning_tokens\"],\"dimensions\":[\"model\"],\"granularity\":\"hour\",\"time_range\":{{\"start\":\"{s}\",\"end\":\"{s}\"}},\"limit\":10000}}",
+                .{ start, end },
+            );
+            defer allocator.free(analytics_query);
+            analytics = fetch(allocator, client, .{
+                .url = "https://openrouter.ai/api/v1/analytics/query",
                 .bearer_token = management_key,
+                .method = .POST,
+                .payload = analytics_query,
+                .content_type = "application/json",
+                .max_response_bytes = 16 * 1024 * 1024,
             }) catch null;
         }
     }
@@ -428,15 +421,20 @@ fn refreshOpenRouter(
     try output.writer.writeAll("{\"key\":");
     try output.writer.writeAll(key);
     try output.writer.print(
-        ",\"activity_period\":{{\"start_unix\":{d},\"end_exclusive_unix\":{d}}}",
-        .{ period.start_unix, period.end_exclusive_unix },
+        ",\"activity_period\":{{\"start_unix\":{d},\"end_exclusive_unix\":{d}}},\"history_period\":{{\"start_unix\":{d},\"end_exclusive_unix\":{d}}}",
+        .{
+            period.start_unix,
+            period.end_exclusive_unix,
+            reportEnd(period, now) -| 30 * std.time.s_per_day,
+            reportEnd(period, now),
+        },
     );
     if (credits) |body| {
         try output.writer.writeAll(",\"credits\":");
         try output.writer.writeAll(body);
     }
-    if (activity) |body| {
-        try output.writer.writeAll(",\"activity\":");
+    if (analytics) |body| {
+        try output.writer.writeAll(",\"analytics\":");
         try output.writer.writeAll(body);
     }
     try output.writer.writeByte('}');
@@ -685,29 +683,42 @@ fn refreshGitHub(
     client: anytype,
     provider: *github.GitHub,
     token: []const u8,
-    raw_organization: []const u8,
+    raw_organizations: []const u8,
     period: model.Period,
     now: i64,
 ) !void {
-    const path = try githubBillingPath(allocator, raw_organization, period);
-    defer allocator.free(path);
-    const url = try std.fmt.allocPrint(
-        allocator,
-        "https://api.github.com{s}",
-        .{path},
-    );
-    defer allocator.free(url);
+    const organizations = try githubOrganizations(allocator, raw_organizations);
+    defer allocator.free(organizations);
     const headers = [_]std.http.Header{
         .{ .name = "Accept", .value = "application/vnd.github+json" },
         .{ .name = "X-GitHub-Api-Version", .value = "2026-03-10" },
     };
-    const body = try fetch(allocator, client, .{
-        .url = url,
-        .bearer_token = token,
-        .extra_headers = &headers,
-    });
-    defer allocator.free(body);
-    try provider.ingest(allocator, "billing-usage", body, now);
+    var documents: std.ArrayList(github.OrganizationUsage) = .empty;
+    defer {
+        for (documents.items) |document| allocator.free(document.payload);
+        documents.deinit(allocator);
+    }
+    for (organizations) |organization| {
+        const path = try githubBillingPath(allocator, organization, period);
+        defer allocator.free(path);
+        const url = try std.fmt.allocPrint(
+            allocator,
+            "https://api.github.com{s}",
+            .{path},
+        );
+        defer allocator.free(url);
+        const body = try fetch(allocator, client, .{
+            .url = url,
+            .bearer_token = token,
+            .extra_headers = &headers,
+        });
+        errdefer allocator.free(body);
+        try documents.append(allocator, .{
+            .organization = organization,
+            .payload = body,
+        });
+    }
+    try provider.ingestOrganizations(allocator, documents.items, now);
 }
 
 pub fn refreshGitHubCLI(
@@ -715,7 +726,7 @@ pub fn refreshGitHubCLI(
     io: std.Io,
     home: []const u8,
     provider: *github.GitHub,
-    raw_organization: []const u8,
+    raw_organizations: []const u8,
     period: model.Period,
     now: i64,
 ) !void {
@@ -724,7 +735,7 @@ pub fn refreshGitHubCLI(
         allocator,
         &runner,
         provider,
-        raw_organization,
+        raw_organizations,
         period,
         now,
     );
@@ -734,15 +745,54 @@ fn refreshGitHubWithRunner(
     allocator: std.mem.Allocator,
     runner: anytype,
     provider: *github.GitHub,
-    raw_organization: []const u8,
+    raw_organizations: []const u8,
     period: model.Period,
     now: i64,
 ) !void {
-    const path = try githubBillingPath(allocator, raw_organization, period);
-    defer allocator.free(path);
-    const body = try runner.run(allocator, path);
-    defer allocator.free(body);
-    try provider.ingest(allocator, "billing-usage", body, now);
+    const organizations = try githubOrganizations(allocator, raw_organizations);
+    defer allocator.free(organizations);
+    var documents: std.ArrayList(github.OrganizationUsage) = .empty;
+    defer {
+        for (documents.items) |document| allocator.free(document.payload);
+        documents.deinit(allocator);
+    }
+    for (organizations) |organization| {
+        const path = try githubBillingPath(allocator, organization, period);
+        defer allocator.free(path);
+        const body = try runner.run(allocator, path);
+        errdefer allocator.free(body);
+        try documents.append(allocator, .{
+            .organization = organization,
+            .payload = body,
+        });
+    }
+    try provider.ingestOrganizations(allocator, documents.items, now);
+}
+
+pub fn discoverGitHubCLIOrganizations(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    home: []const u8,
+) ![]u8 {
+    var runner = GitHubCLIRunner{ .io = io, .home = home };
+    return discoverGitHubCLIOrganizationsWithRunner(allocator, &runner);
+}
+
+fn discoverGitHubCLIOrganizationsWithRunner(
+    allocator: std.mem.Allocator,
+    runner: anytype,
+) ![]u8 {
+    const raw = try runner.listOrganizations(allocator);
+    defer allocator.free(raw);
+    const organizations = try githubOrganizations(allocator, raw);
+    defer allocator.free(organizations);
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    for (organizations, 0..) |organization, index| {
+        if (index > 0) try output.writer.writeByte('\n');
+        try output.writer.writeAll(organization);
+    }
+    return output.toOwnedSlice();
 }
 
 const GitHubCLIRunner = struct {
@@ -750,6 +800,21 @@ const GitHubCLIRunner = struct {
     home: []const u8,
 
     fn run(self: *GitHubCLIRunner, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+        return self.runCommand(allocator, path, .billing);
+    }
+
+    fn listOrganizations(self: *GitHubCLIRunner, allocator: std.mem.Allocator) ![]u8 {
+        return self.runCommand(allocator, "/user/orgs?per_page=100", .organizations);
+    }
+
+    const Command = enum { billing, organizations };
+
+    fn runCommand(
+        self: *GitHubCLIRunner,
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        command: Command,
+    ) ![]u8 {
         const home_executable = try std.fs.path.join(
             allocator,
             &.{ self.home, ".nix-profile/bin/gh" },
@@ -770,16 +835,32 @@ const GitHubCLIRunner = struct {
             "gh",
         };
         for (candidates) |executable| {
-            const argv = githubCLIArguments(executable, path);
-            const result = std.process.run(allocator, self.io, .{
-                .argv = &argv,
-                .stdout_limit = .limited(32 * 1024 * 1024),
-                .stderr_limit = .limited(1024 * 1024),
-                .timeout = .{ .duration = .{
-                    .clock = .awake,
-                    .raw = .fromSeconds(30),
-                } },
-            }) catch |err| switch (err) {
+            const result = switch (command) {
+                .billing => result: {
+                    const argv = githubCLIArguments(executable, path);
+                    break :result std.process.run(allocator, self.io, .{
+                        .argv = &argv,
+                        .stdout_limit = .limited(32 * 1024 * 1024),
+                        .stderr_limit = .limited(1024 * 1024),
+                        .timeout = .{ .duration = .{
+                            .clock = .awake,
+                            .raw = .fromSeconds(30),
+                        } },
+                    });
+                },
+                .organizations => result: {
+                    const argv = githubCLIOrganizationArguments(executable, path);
+                    break :result std.process.run(allocator, self.io, .{
+                        .argv = &argv,
+                        .stdout_limit = .limited(4 * 1024 * 1024),
+                        .stderr_limit = .limited(1024 * 1024),
+                        .timeout = .{ .duration = .{
+                            .clock = .awake,
+                            .raw = .fromSeconds(30),
+                        } },
+                    });
+                },
+            } catch |err| switch (err) {
                 error.FileNotFound => continue,
                 else => return err,
             };
@@ -816,18 +897,63 @@ fn githubCLIArguments(executable: []const u8, path: []const u8) [11][]const u8 {
     };
 }
 
+fn githubCLIOrganizationArguments(executable: []const u8, path: []const u8) [14][]const u8 {
+    return .{
+        executable,
+        "api",
+        "--hostname",
+        "github.com",
+        "--method",
+        "GET",
+        "--header",
+        "Accept: application/vnd.github+json",
+        "--header",
+        "X-GitHub-Api-Version: 2026-03-10",
+        "--paginate",
+        "--jq",
+        ".[].login",
+        path,
+    };
+}
+
+fn githubOrganizations(
+    allocator: std.mem.Allocator,
+    raw_organizations: []const u8,
+) ![][]const u8 {
+    var organizations: std.ArrayList([]const u8) = .empty;
+    errdefer organizations.deinit(allocator);
+    var values = std.mem.tokenizeAny(u8, raw_organizations, ",\r\n");
+    while (values.next()) |raw_organization| {
+        const organization = std.mem.trim(u8, raw_organization, " \t");
+        try validateGitHubOrganization(organization);
+        const duplicate = for (organizations.items) |existing| {
+            if (std.ascii.eqlIgnoreCase(existing, organization)) break true;
+        } else false;
+        if (!duplicate) try organizations.append(allocator, organization);
+        if (organizations.items.len > 100) return error.TooManyOrganizations;
+    }
+    if (organizations.items.len == 0) return error.InvalidOrganization;
+    return organizations.toOwnedSlice(allocator);
+}
+
+fn validateGitHubOrganization(organization: []const u8) !void {
+    if (organization.len == 0 or organization.len > 100) {
+        return error.InvalidOrganization;
+    }
+    for (organization) |character| {
+        if (!std.ascii.isAlphanumeric(character) and character != '-') {
+            return error.InvalidOrganization;
+        }
+    }
+}
+
 fn githubBillingPath(
     allocator: std.mem.Allocator,
     raw_organization: []const u8,
     period: model.Period,
 ) ![]u8 {
     const organization = std.mem.trim(u8, raw_organization, " \t\r\n");
-    if (organization.len == 0 or organization.len > 100) return error.InvalidOrganization;
-    for (organization) |character| {
-        if (!std.ascii.isAlphanumeric(character) and character != '-') {
-            return error.InvalidOrganization;
-        }
-    }
+    try validateGitHubOrganization(organization);
     const date = dateTime(period.start_unix) orelse return error.InvalidPeriod;
     return std.fmt.allocPrint(
         allocator,
@@ -994,11 +1120,6 @@ fn nonEmpty(value: ?[]const u8) bool {
 test "provider configuration requires complete credential pairs" {
     const credentials = Credentials{
         .digitalocean_token = "token",
-        .ovh_endpoint = "ovh-eu",
-        .ovh_application_key = "application",
-        .ovh_application_secret = "secret",
-        .ovh_consumer_key = "consumer",
-        .ovh_project_id = "project",
         .hetzner_token = "token",
         .cloudflare_token = "token",
         .github_token = "token",
@@ -1006,7 +1127,6 @@ test "provider configuration requires complete credential pairs" {
         .xai_management_key = "management",
     };
     try std.testing.expect(credentials.isConfigured(.digitalocean));
-    try std.testing.expect(credentials.isConfigured(.ovh));
     try std.testing.expect(credentials.isConfigured(.hetzner));
     try std.testing.expect(!credentials.isConfigured(.cloudflare));
     try std.testing.expect(credentials.isConfigured(.github));
@@ -1030,6 +1150,97 @@ test "xAI analytics timestamps use the management API format" {
     const value = try analyticsTimestamp(std.testing.allocator, 0);
     defer std.testing.allocator.free(value);
     try std.testing.expectEqualStrings("1970-01-01 00:00:00", value);
+}
+
+test "OpenRouter refresh queries rolling analytics by model and hour" {
+    const Backend = struct {
+        calls: usize = 0,
+
+        pub fn get(
+            self: *@This(),
+            allocator: std.mem.Allocator,
+            request: http.Request,
+        ) !http.Response {
+            const body = switch (self.calls) {
+                0 => blk: {
+                    try std.testing.expectEqualStrings(
+                        "https://openrouter.ai/api/v1/key",
+                        request.url,
+                    );
+                    try std.testing.expectEqualStrings("inference-secret", request.bearer_token.?);
+                    break :blk "{\"data\":{\"usage_monthly\":0}}";
+                },
+                1 => blk: {
+                    try std.testing.expectEqualStrings(
+                        "https://openrouter.ai/api/v1/credits",
+                        request.url,
+                    );
+                    try std.testing.expectEqualStrings("management-secret", request.bearer_token.?);
+                    break :blk "{\"data\":{\"total_credits\":50,\"total_usage\":0.25}}";
+                },
+                2 => blk: {
+                    try std.testing.expectEqualStrings(
+                        "https://openrouter.ai/api/v1/analytics/query",
+                        request.url,
+                    );
+                    try std.testing.expectEqualStrings("management-secret", request.bearer_token.?);
+                    try std.testing.expectEqual(std.http.Method.POST, request.method);
+                    try std.testing.expectEqualStrings("application/json", request.content_type.?);
+                    try std.testing.expect(std.mem.indexOf(
+                        u8,
+                        request.payload.?,
+                        "\"metrics\":[\"total_usage\",\"tokens_prompt\",\"tokens_completion\",\"reasoning_tokens\"]",
+                    ) != null);
+                    try std.testing.expect(std.mem.indexOf(
+                        u8,
+                        request.payload.?,
+                        "\"dimensions\":[\"model\"],\"granularity\":\"hour\"",
+                    ) != null);
+                    try std.testing.expect(std.mem.indexOf(
+                        u8,
+                        request.payload.?,
+                        "\"start\":\"2026-07-26T13:20:00Z\"",
+                    ) != null);
+                    try std.testing.expect(std.mem.indexOf(
+                        u8,
+                        request.payload.?,
+                        "\"end\":\"2026-08-25T13:20:00Z\"",
+                    ) != null);
+                    break :blk
+                    \\{"data":{"data":[{"date__hour":"2026-08-25 13:00:00","model":"google/gemini-3.7-flash","total_usage":0.003,"tokens_prompt":"30000","tokens_completion":"900","reasoning_tokens":"100"}],"metadata":{"truncated":false}}}
+                    ;
+                },
+                else => return error.UnexpectedRequest,
+            };
+            self.calls += 1;
+            return .{ .status = 200, .body = try allocator.dupe(u8, body) };
+        }
+    };
+
+    var backend = Backend{};
+    var client = http.Client(Backend).init(&backend);
+    var provider = openrouter.OpenRouter.init();
+    defer provider.deinit();
+    const period = model.Period{
+        .start_unix = 1785535200,
+        .end_exclusive_unix = 1788213600,
+    };
+    try refreshOpenRouter(
+        std.testing.allocator,
+        &client,
+        &provider,
+        "inference-secret",
+        " management-secret ",
+        period,
+        1787664000,
+    );
+    const report = try provider.collect(std.testing.allocator, period);
+    defer report.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), backend.calls);
+    try std.testing.expectEqual(@as(i64, 3_000), report.summary.current_cost_micros);
+    try std.testing.expectEqual(@as(?i64, 49_750_000), report.summary.credit_remaining_micros);
+    try std.testing.expectEqual(@as(usize, 1), report.spend_series.len);
 }
 
 test "xAI refresh uses the management billing endpoints and bearer key" {
@@ -1106,12 +1317,17 @@ test "GitHub CLI refresh keeps authentication inside gh" {
             path: []const u8,
         ) ![]u8 {
             self.calls += 1;
+            if (std.mem.indexOf(u8, path, "/organizations/alpha/") != null) {
+                return allocator.dupe(u8,
+                    \\{"usageItems":[{"product":"Actions","sku":"Linux","netAmount":1.25}]}
+                );
+            }
             try std.testing.expectEqualStrings(
-                "/organizations/costbar/settings/billing/usage?year=1970&month=1",
+                "/organizations/beta/settings/billing/usage?year=1970&month=1",
                 path,
             );
             return allocator.dupe(u8,
-                \\{"usageItems":[{"product":"Actions","sku":"Linux","netAmount":1.25}]}
+                \\{"usageItems":[{"product":"Actions","sku":"Linux","netAmount":2.75}]}
             );
         }
     };
@@ -1124,14 +1340,15 @@ test "GitHub CLI refresh keeps authentication inside gh" {
         std.testing.allocator,
         &runner,
         &provider,
-        " costbar ",
+        " alpha, beta ",
         period,
         100,
     );
     const report = try provider.collect(std.testing.allocator, period);
     defer report.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), runner.calls);
-    try std.testing.expectEqual(@as(i64, 1_250_000), report.summary.current_cost_micros);
+    try std.testing.expectEqual(@as(usize, 2), runner.calls);
+    try std.testing.expectEqual(@as(i64, 4_000_000), report.summary.current_cost_micros);
+    try std.testing.expectEqual(@as(usize, 2), report.line_items.len);
 }
 
 test "GitHub CLI arguments call the API without exporting a token" {
@@ -1144,6 +1361,37 @@ test "GitHub CLI arguments call the API without exporting a token" {
         try std.testing.expect(!std.mem.eql(u8, argument, "token"));
         try std.testing.expect(!std.mem.eql(u8, argument, "auth"));
     }
+}
+
+test "GitHub CLI organization discovery normalizes and deduplicates names" {
+    const Runner = struct {
+        fn listOrganizations(_: *@This(), allocator: std.mem.Allocator) ![]u8 {
+            return allocator.dupe(u8, "beta\nalpha\nBETA\n");
+        }
+    };
+    var runner = Runner{};
+    const organizations = try discoverGitHubCLIOrganizationsWithRunner(
+        std.testing.allocator,
+        &runner,
+    );
+    defer std.testing.allocator.free(organizations);
+    try std.testing.expectEqualStrings("beta\nalpha", organizations);
+
+    const argv = githubCLIOrganizationArguments("/test/gh", "/user/orgs?per_page=100");
+    try std.testing.expectEqualStrings("--paginate", argv[10]);
+    try std.testing.expectEqualStrings(".[].login", argv[12]);
+    try std.testing.expectEqualStrings("/user/orgs?per_page=100", argv[13]);
+}
+
+test "GitHub organization selection accepts commas and newlines" {
+    const organizations = try githubOrganizations(
+        std.testing.allocator,
+        " alpha, beta\nALPHA ",
+    );
+    defer std.testing.allocator.free(organizations);
+    try std.testing.expectEqual(@as(usize, 2), organizations.len);
+    try std.testing.expectEqualStrings("alpha", organizations[0]);
+    try std.testing.expectEqualStrings("beta", organizations[1]);
 }
 
 test "query values are percent encoded in Zig" {
