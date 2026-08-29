@@ -899,11 +899,19 @@ fn appendUniqueModel(
     models: *std.ArrayList([]const u8),
     name: []const u8,
 ) !void {
-    if (name.len == 0) return;
+    if (name.len == 0 or isPlaceholderModel(name)) return;
     for (models.items) |existing| {
         if (std.mem.eql(u8, existing, name)) return;
     }
     try models.append(allocator, try allocator.dupe(u8, name));
+}
+
+/// Agents stamp locally fabricated assistant turns — API-error placeholders,
+/// interrupt notices, "No response requested" — with a bracketed marker such as
+/// `<synthetic>` where the model name would go. Those turns were never sent to
+/// a model, and they carry no tokens, so they are not models the user ran.
+fn isPlaceholderModel(name: []const u8) bool {
+    return name.len > 0 and name[0] == '<';
 }
 
 fn codexTokens(raw: RawTokens) Tokens {
@@ -1152,6 +1160,20 @@ test "Claude JSONL scan sums assistant usage only" {
     try std.testing.expectEqual(@as(u64, 12), scan.tokens.output);
     try std.testing.expectEqual(@as(u64, 3), scan.tokens.cache_read);
     try std.testing.expectEqual(@as(u64, 2), scan.tokens.cache_creation);
+}
+
+test "Claude JSONL scan ignores synthetic placeholder models" {
+    const jsonl =
+        \\{"type":"assistant","timestamp":"2026-08-10T12:01:00Z","message":{"model":"claude-opus","usage":{"input_tokens":10,"output_tokens":5}}}
+        \\{"type":"assistant","timestamp":"2026-08-10T12:02:00Z","message":{"model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}
+    ;
+    var scan = try scanFile(std.testing.allocator, .claude, jsonl, .{
+        .start_unix = 1_785_542_400,
+        .end_exclusive_unix = 1_788_220_800,
+    });
+    defer scan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), scan.models.len);
+    try std.testing.expectEqualStrings("claude-opus", scan.models[0]);
 }
 
 test "Claude JSONL scan keeps the final streaming snapshot per message request" {
