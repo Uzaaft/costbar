@@ -20,7 +20,7 @@ struct DashboardView: View {
       footer
     }
     .frame(width: 340)
-    .background(Palette.background)
+    .background(MenuPalette.background)
     .environment(\.colorScheme, .dark)
   }
 
@@ -35,7 +35,7 @@ struct DashboardView: View {
         } else {
           Text("Subscription usage")
             .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(Palette.textPrimary)
+            .foregroundStyle(MenuPalette.textPrimary)
             .padding(.horizontal, 16)
             .padding(.top, 14)
         }
@@ -73,7 +73,7 @@ struct DashboardView: View {
           .font(.system(size: 11, weight: .semibold))
           .tracking(0.9)
           .textCase(.uppercase)
-          .foregroundStyle(Palette.textSecondary)
+          .foregroundStyle(MenuPalette.textSecondary)
         Spacer(minLength: 8)
         statusBadge
       }
@@ -88,13 +88,13 @@ struct DashboardView: View {
           Text("\(credit.currencyText(code: total.currency)) prepaid credit left")
             .font(.system(size: 12))
         }
-        .foregroundStyle(Palette.textSecondary)
+        .foregroundStyle(MenuPalette.textSecondary)
       }
 
       if let projected = total.projectedCostMicros {
         Text("projected \(projected.currencyText(code: total.currency))  ·  end of month")
           .font(.system(size: 12))
-          .foregroundStyle(Palette.textTertiary)
+          .foregroundStyle(MenuPalette.textTertiary)
       }
     }
   }
@@ -104,15 +104,15 @@ struct DashboardView: View {
     return HStack(alignment: .firstTextBaseline, spacing: 1) {
       Text(parts.symbol)
         .font(.system(size: 22, weight: .light))
-        .foregroundStyle(Palette.textSecondary)
+        .foregroundStyle(MenuPalette.textSecondary)
       Text(parts.whole)
         .font(.system(size: 44, weight: .light))
         .monospacedDigit()
-        .foregroundStyle(Palette.textPrimary)
+        .foregroundStyle(MenuPalette.textPrimary)
       Text(parts.fraction)
         .font(.system(size: 26, weight: .light))
         .monospacedDigit()
-        .foregroundStyle(Palette.textPrimary.opacity(0.62))
+        .foregroundStyle(MenuPalette.textPrimary.opacity(0.62))
     }
     .lineLimit(1)
     .minimumScaleFactor(0.6)
@@ -127,29 +127,22 @@ struct DashboardView: View {
         Text(statusText(now: context.date))
           .font(.system(size: 11.5))
           .monospacedDigit()
-          .foregroundStyle(Palette.textSecondary)
+          .foregroundStyle(MenuPalette.textSecondary)
       }
     }
   }
 
   private var statusColor: Color {
     switch store.dataSourceLabel {
-    case "live": Palette.live
+    case "live": MenuPalette.live
     case "stale": .orange
-    default: Palette.textTertiary
+    default: MenuPalette.textTertiary
     }
   }
 
   private func statusText(now: Date) -> String {
     guard let updated = store.lastUpdatedAt else { return store.dataSourceLabel }
-    return "\(store.dataSourceLabel) · \(Self.ageText(since: updated, now: now))"
-  }
-
-  private static func ageText(since date: Date, now: Date) -> String {
-    let seconds = max(0, Int(now.timeIntervalSince(date)))
-    if seconds < 60 { return "\(seconds)s ago" }
-    if seconds < 3600 { return "\(seconds / 60)m ago" }
-    return "\(seconds / 3600)h ago"
+    return "\(store.dataSourceLabel) · \(RelativeAge.text(since: updated, now: now))"
   }
 
   private func errorBanner(_ message: String) -> some View {
@@ -187,7 +180,7 @@ struct DashboardView: View {
         Spacer(minLength: 0)
         Text("⌘B")
           .font(.system(size: 11.5, design: .monospaced))
-          .foregroundStyle(Palette.textTertiary)
+          .foregroundStyle(MenuPalette.textTertiary)
         Image(systemName: showsBreakdown ? "chart.bar.xaxis" : "chart.bar")
           .font(.system(size: 13))
       }
@@ -198,7 +191,7 @@ struct DashboardView: View {
     .buttonStyle(.plain)
     .keyboardShortcut("b", modifiers: .command)
     .hoverHighlight()
-    .foregroundStyle(Palette.textPrimary.opacity(0.85))
+    .foregroundStyle(MenuPalette.textPrimary.opacity(0.85))
     .padding(.horizontal, 8)
     .padding(.vertical, 5)
   }
@@ -255,7 +248,7 @@ struct DashboardView: View {
       .hoverHighlight(cornerRadius: 6)
       .help("Quit Costbar")
     }
-    .foregroundStyle(Palette.textPrimary.opacity(0.85))
+    .foregroundStyle(MenuPalette.textPrimary.opacity(0.85))
     .padding(.horizontal, 8)
     .padding(.vertical, 5)
   }
@@ -269,14 +262,21 @@ struct DashboardView: View {
 
   private var hairline: some View {
     Rectangle()
-      .fill(Palette.hairline)
+      .fill(MenuPalette.hairline)
       .frame(height: 1)
   }
 }
 
 private struct ProviderRow: View {
+  /// Long enough that skimming the list does not flash cards, short enough that
+  /// pausing on a row feels like it answered on its own.
+  private static let hoverDelay = Duration.milliseconds(300)
+
   let report: Dashboard.ProviderReport
   let aggregateCostMicros: Int64
+
+  @State private var isHovering = false
+  @State private var showsDetail = false
 
   private var summary: Dashboard.ProviderSummary { report.summary }
 
@@ -288,10 +288,10 @@ private struct ProviderRow: View {
         VStack(alignment: .leading, spacing: 1) {
           Text(summary.displayName)
             .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(Palette.textPrimary)
+            .foregroundStyle(MenuPalette.textPrimary)
           Text(subtitle)
             .font(.system(size: 11.5))
-            .foregroundStyle(Palette.textSecondary)
+            .foregroundStyle(MenuPalette.textSecondary)
             .lineLimit(1)
             .truncationMode(.tail)
         }
@@ -303,14 +303,14 @@ private struct ProviderRow: View {
           case .available:
             Text(providerAmount)
               .font(.system(size: 13, weight: .medium, design: .monospaced))
-              .foregroundStyle(Palette.textPrimary)
+              .foregroundStyle(MenuPalette.textPrimary)
             Text(summary.contributesToTotals ? percentageText : "local usage")
               .font(.system(size: 11, design: .monospaced))
-              .foregroundStyle(Palette.textTertiary)
+              .foregroundStyle(MenuPalette.textTertiary)
           case .notConfigured:
             Image(systemName: "gearshape")
               .font(.system(size: 12))
-              .foregroundStyle(Palette.textTertiary)
+              .foregroundStyle(MenuPalette.textTertiary)
           case .unavailable:
             Image(systemName: "exclamationmark.triangle.fill")
               .font(.system(size: 12))
@@ -329,6 +329,19 @@ private struct ProviderRow: View {
     .padding(.vertical, 7)
     .contentShape(Rectangle())
     .hoverHighlight()
+    .onHover { hovering in
+      isHovering = hovering
+      if !hovering { showsDetail = false }
+    }
+    .task(id: isHovering) {
+      guard isHovering else { return }
+      try? await Task.sleep(for: Self.hoverDelay)
+      guard !Task.isCancelled else { return }
+      showsDetail = true
+    }
+    .hoverCard(isPresented: showsDetail) {
+      ProviderDetailCard(report: report)
+    }
   }
 
   private func allowanceRow(_ window: Dashboard.AllowanceWindow) -> some View {
@@ -341,7 +354,7 @@ private struct ProviderRow: View {
           .monospacedDigit()
       }
       .font(.system(size: 10.5))
-      .foregroundStyle(Palette.textTertiary)
+      .foregroundStyle(MenuPalette.textTertiary)
 
       ProgressView(value: min(max(window.usedPercent, 0), 100), total: 100)
         .progressViewStyle(.linear)
@@ -461,7 +474,7 @@ private struct BreakdownList: View {
         Text(report.summary.currentCostMicros.currencyText(code: report.summary.currency))
           .font(.system(size: 11, weight: .semibold, design: .monospaced))
       }
-      .foregroundStyle(Palette.textSecondary)
+      .foregroundStyle(MenuPalette.textSecondary)
       .padding(.bottom, 2)
 
       ForEach(groups(of: report)) { group in
@@ -506,11 +519,11 @@ private struct BreakdownList: View {
       VStack(alignment: .leading, spacing: 1) {
         Text(label)
           .font(.system(size: 12, weight: emphasized ? .medium : .regular))
-          .foregroundStyle(Palette.textPrimary.opacity(emphasized ? 1 : 0.82))
+          .foregroundStyle(MenuPalette.textPrimary.opacity(emphasized ? 1 : 0.82))
         if let detail {
           Text(detail)
             .font(.system(size: 10.5))
-            .foregroundStyle(Palette.textTertiary)
+            .foregroundStyle(MenuPalette.textTertiary)
         }
       }
       .lineLimit(1)
@@ -520,7 +533,7 @@ private struct BreakdownList: View {
 
       Text(currency.map { amountMicros.currencyText(code: $0) } ?? amountMicros.decimalText())
         .font(.system(size: 12, design: .monospaced))
-        .foregroundStyle(emphasized ? Palette.textPrimary : Palette.textSecondary)
+        .foregroundStyle(emphasized ? MenuPalette.textPrimary : MenuPalette.textSecondary)
     }
     .padding(.leading, indent)
   }
@@ -550,32 +563,3 @@ extension Dashboard {
   }
 }
 
-private enum Palette {
-  static let background = Color(red: 0.106, green: 0.106, blue: 0.118)
-  static let textPrimary = Color.white
-  static let textSecondary = Color.white.opacity(0.58)
-  static let textTertiary = Color.white.opacity(0.38)
-  static let hairline = Color.white.opacity(0.08)
-  static let hover = Color.white.opacity(0.08)
-  static let live = Color(red: 0.16, green: 0.55, blue: 1.0)
-}
-
-private struct HoverHighlight: ViewModifier {
-  let cornerRadius: CGFloat
-  @State private var isHovering = false
-
-  func body(content: Content) -> some View {
-    content
-      .background(
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-          .fill(isHovering ? Palette.hover : .clear)
-      )
-      .onHover { isHovering = $0 }
-  }
-}
-
-extension View {
-  fileprivate func hoverHighlight(cornerRadius: CGFloat = 8) -> some View {
-    modifier(HoverHighlight(cornerRadius: cornerRadius))
-  }
-}
