@@ -73,6 +73,7 @@ private extension Dashboard.ProviderReport {
                 label: value.label.string,
                 usedPercent: value.used_percent,
                 resetsAtUnix: value.resets_at_unix.optional,
+                durationMinutes: value.duration_minutes.optional,
                 detail: value.has_detail == 0 ? nil : value.detail.string
             )
         }
@@ -266,8 +267,4 @@ private extension costbar_bytes_t {
         guard let ptr, len > 0 else { return "" }
         return String(bytes: UnsafeBufferPointer(start: ptr, count: len), encoding: .utf8) ?? ""
     }
-}
-
-private extension costbar_optional_i64_t {
-    var optional: Int64? { present == 0 ? nil : value }
 }

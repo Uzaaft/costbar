@@ -51,6 +51,10 @@ struct Dashboard: Sendable {
         let label: String
         let usedPercent: Double
         let resetsAtUnix: Int64?
+        /// How long the whole window runs, when the provider says. With
+        /// `resetsAtUnix` this is what `AllowancePace` needs to tell an
+        /// allowance that is merely half spent from one about to run out.
+        let durationMinutes: Int64?
         let detail: String?
     }
 

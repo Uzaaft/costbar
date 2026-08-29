@@ -17,6 +17,7 @@ const xai_api = @import("providers/xai_api.zig");
 const github = @import("providers/github.zig");
 const cursor = @import("providers/cursor.zig");
 const opencode = @import("providers/opencode.zig");
+const allowance_pace = @import("allowance_pace.zig");
 const local_usage = @import("local_usage.zig");
 const dashboard_cache = @import("dashboard_cache.zig");
 const live_refresh = @import("live_refresh.zig");
@@ -126,8 +127,18 @@ pub const AllowanceView = extern struct {
     label: Bytes,
     used_percent: f64,
     resets_at_unix: OptionalI64,
+    duration_minutes: OptionalI64,
     detail: Bytes,
     has_detail: u8,
+};
+
+/// How an allowance is tracking against its own clock. `empties_at_unix` is an
+/// absolute instant rather than a countdown so a caller can render a live
+/// "empty in 40m" from one computation.
+pub const AllowancePaceView = extern struct {
+    deviation_points: f64,
+    empties_at_unix: OptionalI64,
+    resets_at_unix: i64,
 };
 
 pub const TokenUsageView = extern struct {
@@ -293,7 +304,7 @@ const Core = struct {
 };
 
 export fn costbar_abi_version() u32 {
-    return 12;
+    return 13;
 }
 
 /// Returns the organizations visible to the active GitHub CLI identity as a
@@ -852,8 +863,41 @@ export fn costbar_snapshot_allowance(
         .label = bytesView(allowance_value.label),
         .used_percent = allowance_value.used_percent,
         .resets_at_unix = optionalI64(allowance_value.resets_at_unix),
+        .duration_minutes = optionalI64(allowance_value.duration_minutes),
         .detail = bytesView(allowance_value.detail orelse ""),
         .has_detail = @intFromBool(allowance_value.detail != null),
+    };
+    return .ok;
+}
+
+/// Computes how an allowance is tracking against its own clock at `now_unix`.
+///
+/// Takes the window's values rather than a snapshot index: consumers render
+/// from decoded copies long after the snapshot handle is gone, and the answer
+/// changes with the caller's clock rather than with the data.
+///
+/// Returns `unsupported` when the window carries no honest verdict: no reset,
+/// no length, a reset the clock disagrees with, or too little of the window
+/// elapsed to imply a rate.
+export fn costbar_allowance_pace(
+    used_percent: f64,
+    resets_at_unix: OptionalI64,
+    duration_minutes: OptionalI64,
+    now_unix: i64,
+    out_pace: ?*AllowancePaceView,
+) Status {
+    const output = out_pace orelse return .invalid_argument;
+    const pace = allowance_pace.compute(.{
+        .id = "",
+        .label = "",
+        .used_percent = used_percent,
+        .resets_at_unix = if (resets_at_unix.present != 0) resets_at_unix.value else null,
+        .duration_minutes = if (duration_minutes.present != 0) duration_minutes.value else null,
+    }, now_unix) orelse return .unsupported;
+    output.* = .{
+        .deviation_points = pace.deviation_points,
+        .empties_at_unix = optionalI64(pace.empties_at_unix),
+        .resets_at_unix = pace.resets_at_unix,
     };
     return .ok;
 }
@@ -1701,6 +1745,7 @@ fn localAllowance(
         .label = label,
         .used_percent = window.used_percent,
         .resets_at_unix = window.resets_at_unix,
+        .duration_minutes = window.duration_minutes,
     };
 }
 
@@ -1723,6 +1768,40 @@ fn snapshotReport(snapshot: ?*const Snapshot, provider_index: usize) ?model.Prov
     const dashboard = if (snapshot) |value| value.dashboard else return null;
     if (provider_index >= dashboard.providers.len) return null;
     return dashboard.providers[provider_index];
+}
+
+test "C allowance pace crosses the boundary and refuses dishonest windows" {
+    const now: i64 = 1_800_000_000;
+    var view: AllowancePaceView = undefined;
+
+    // Half of a five-hour window gone, 80% of the allowance with it.
+    try std.testing.expectEqual(Status.ok, costbar_allowance_pace(
+        80,
+        optionalI64(now + 9_000),
+        optionalI64(300),
+        now,
+        &view,
+    ));
+    try std.testing.expectApproxEqAbs(@as(f64, 30), view.deviation_points, 0.001);
+    try std.testing.expectEqual(@as(i64, now + 2_250), view.empties_at_unix.value);
+    try std.testing.expectEqual(@as(u8, 1), view.empties_at_unix.present);
+    try std.testing.expectEqual(@as(i64, now + 9_000), view.resets_at_unix);
+
+    // A window with no length has no pace, and neither does a missing output.
+    try std.testing.expectEqual(Status.unsupported, costbar_allowance_pace(
+        80,
+        optionalI64(now + 9_000),
+        optionalI64(null),
+        now,
+        &view,
+    ));
+    try std.testing.expectEqual(Status.invalid_argument, costbar_allowance_pace(
+        80,
+        optionalI64(now + 9_000),
+        optionalI64(300),
+        now,
+        null,
+    ));
 }
 
 test "C API has no fabricated provider data before the first refresh" {

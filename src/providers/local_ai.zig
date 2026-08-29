@@ -40,6 +40,7 @@ pub fn LocalAI(
             label: []const u8,
             used_percent: f64,
             resets_at_unix: ?i64 = null,
+            duration_minutes: ?i64 = null,
             detail: ?[]const u8 = null,
         };
 
@@ -79,6 +80,7 @@ pub fn LocalAI(
             label: []const u8,
             used_percent: f64,
             resets_at_unix: ?i64 = null,
+            duration_minutes: ?i64 = null,
             detail: ?[]const u8 = null,
         };
 
@@ -198,6 +200,7 @@ pub fn LocalAI(
                     .label = try arena.dupe(u8, allowance.label),
                     .used_percent = allowance.used_percent,
                     .resets_at_unix = allowance.resets_at_unix,
+                    .duration_minutes = allowance.duration_minutes,
                     .detail = if (allowance.detail) |detail|
                         try arena.dupe(u8, detail)
                     else
@@ -282,6 +285,7 @@ pub fn LocalAI(
                     .label = allowance.label,
                     .used_percent = allowance.used_percent,
                     .resets_at_unix = allowance.resets_at_unix,
+                    .duration_minutes = allowance.duration_minutes,
                     .detail = allowance.detail,
                 };
             }

@@ -1,5 +1,6 @@
 pub const model = @import("model.zig");
 pub const money = @import("money.zig");
+pub const allowance_pace = @import("allowance_pace.zig");
 pub const http = @import("http.zig");
 pub const provider = @import("provider.zig");
 pub const registry = @import("registry.zig");
@@ -32,6 +33,7 @@ comptime {
 test {
     _ = model;
     _ = money;
+    _ = allowance_pace;
     _ = http;
     _ = provider;
     _ = registry;

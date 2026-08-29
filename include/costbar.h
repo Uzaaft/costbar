@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define COSTBAR_ABI_VERSION 12u
+#define COSTBAR_ABI_VERSION 13u
 
 typedef struct costbar_core costbar_core_t;
 
@@ -115,9 +115,19 @@ typedef struct costbar_allowance_view {
     costbar_bytes_t label;
     double used_percent;
     costbar_optional_i64_t resets_at_unix;
+    costbar_optional_i64_t duration_minutes;
     costbar_bytes_t detail;
     uint8_t has_detail;
 } costbar_allowance_view_t;
+
+/* How an allowance is tracking against its own clock. empties_at_unix is an
+ * absolute instant rather than a countdown, so one computation renders a live
+ * "empty in 40m". */
+typedef struct costbar_allowance_pace_view {
+    double deviation_points;
+    costbar_optional_i64_t empties_at_unix;
+    int64_t resets_at_unix;
+} costbar_allowance_pace_view_t;
 
 typedef struct costbar_token_usage_view {
     int64_t period_start_unix;
@@ -299,6 +309,19 @@ costbar_status_t costbar_snapshot_allowance(
     size_t provider_index,
     size_t index,
     costbar_allowance_view_t *out_allowance
+);
+/* Computes how an allowance is tracking against its own clock at now_unix.
+ * Takes the window's values rather than a snapshot index, so a consumer can
+ * call it from a decoded copy at any time. Returns
+ * COSTBAR_STATUS_UNSUPPORTED when the window carries no honest verdict: no
+ * reset, no length, a reset the clock disagrees with, or too little of the
+ * window elapsed to imply a rate. */
+costbar_status_t costbar_allowance_pace(
+    double used_percent,
+    costbar_optional_i64_t resets_at_unix,
+    costbar_optional_i64_t duration_minutes,
+    int64_t now_unix,
+    costbar_allowance_pace_view_t *out_pace
 );
 costbar_status_t costbar_snapshot_token_usage(
     const costbar_snapshot_t *snapshot,

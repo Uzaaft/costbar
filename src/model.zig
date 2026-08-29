@@ -76,6 +76,10 @@ pub const AllowanceWindow = struct {
     label: []const u8,
     used_percent: f64,
     resets_at_unix: ?i64 = null,
+    /// How long the whole window runs, when the provider says. Together with
+    /// `resets_at_unix` this is what lets a consumer tell an allowance that is
+    /// merely half spent from one that is about to run out.
+    duration_minutes: ?i64 = null,
     detail: ?[]const u8 = null,
 };
 
