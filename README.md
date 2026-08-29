@@ -9,11 +9,23 @@ Costbar needs macOS 14 or newer.
 
 ```sh
 brew tap uzaaft/costbar https://github.com/uzaaft/costbar
-brew install --cask costbar
+brew install --cask --no-quarantine costbar
 ```
 
 The tap URL is required because the repository is `costbar` rather than
 `homebrew-costbar`.
+
+Tip builds are ad-hoc signed and **not notarized yet**, so macOS refuses to
+open a quarantined copy. `--no-quarantine` is what avoids that; without it,
+clear the flag by hand after installing:
+
+```sh
+xattr -d com.apple.quarantine /Applications/Costbar.app
+```
+
+Ad-hoc signing also gives every build its own code identity, so the Keychain
+asks again for each provider credential after an upgrade. Both go away once
+tip is notarized.
 
 Costbar publishes one rolling `tip` build instead of tagged versions, so the
 cask is `version :latest` and Homebrew has no version to compare against. A
@@ -23,9 +35,8 @@ plain `brew upgrade` will not notice a new build; ask for one explicitly:
 brew upgrade --cask --greedy costbar
 ```
 
-The app is Developer ID signed and notarized, so it launches without a
-Gatekeeper prompt. It has no Dock icon or window of its own — look for the
-dollar-sign item in the menu bar.
+Costbar has no Dock icon or window of its own — look for the dollar-sign item
+in the menu bar.
 
 Costbar reads nothing until it is told to. Open the gear menu to add provider
 credentials, which are stored as individual login-Keychain items, or to enable
@@ -116,9 +127,10 @@ Useful build options:
 Run `make clean` to remove only generated Zig, Xcode, and XCFramework outputs.
 
 The `Debug` and `ReleaseLocal` configurations sign with an `Apple Development`
-identity, which only this machine trusts. `Release` signs with `Developer ID
-Application` and is used solely by `dist/release.nu`; see
-[docs/RELEASING.md](docs/RELEASING.md).
+identity, which only this machine trusts. `Release` ad-hoc signs so that a
+distributable build needs no Apple account at all, and `dist/release.nu
+--notarize` overrides it with a `Developer ID Application` identity when there
+is one; see [docs/RELEASING.md](docs/RELEASING.md).
 
 To benchmark the local Codex and Claude session scanners against real data:
 

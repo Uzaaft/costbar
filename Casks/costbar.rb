@@ -31,4 +31,22 @@ cask "costbar" do
     "~/Library/Caches/Costbar",
     "~/Library/Preferences/com.costbar.app.plist",
   ]
+
+  # Tip builds are ad-hoc signed rather than notarized, so Gatekeeper refuses
+  # a quarantined copy outright instead of offering to open it anyway.
+  caveats do
+    <<~EOS
+      Costbar is not notarized yet, so macOS blocks it until it is allowed once:
+
+        xattr -d com.apple.quarantine "#{appdir}/Costbar.app"
+
+      Installing with `--no-quarantine` avoids that step:
+
+        brew install --cask --no-quarantine costbar
+
+      Costbar has no Dock icon. Look for the dollar-sign item in the menu bar.
+      Because each tip build is ad-hoc signed it has a new code identity, so
+      the Keychain asks again for each provider credential after an upgrade.
+    EOS
+  end
 end
