@@ -6,5 +6,6 @@ clean:
 	rm -rf \
 		zig-out .zig-cache \
 		macos/build macos/DerivedData \
-		macos/CostbarKit.xcframework
+		macos/CostbarKit.xcframework \
+		dist/out
 .PHONY: clean

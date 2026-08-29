@@ -12,6 +12,7 @@ zig-cache/
 zig-out/
 build.zig.zon.bak
 /result*
+dist/out/
 
 .build/
 macos/.build/

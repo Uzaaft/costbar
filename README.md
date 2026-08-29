@@ -3,6 +3,43 @@
 Costbar is a macOS menu-bar dashboard for developer infrastructure and digital
 subscription costs. Its provider-neutral core is Zig; its native UI is SwiftUI.
 
+## Install
+
+Costbar needs macOS 14 or newer.
+
+```sh
+brew tap uzaaft/costbar https://github.com/uzaaft/costbar
+brew install --cask costbar
+```
+
+The tap URL is required because the repository is `costbar` rather than
+`homebrew-costbar`.
+
+Costbar publishes one rolling `tip` build instead of tagged versions, so the
+cask is `version :latest` and Homebrew has no version to compare against. A
+plain `brew upgrade` will not notice a new build; ask for one explicitly:
+
+```sh
+brew upgrade --cask --greedy costbar
+```
+
+The app is Developer ID signed and notarized, so it launches without a
+Gatekeeper prompt. It has no Dock icon or window of its own — look for the
+dollar-sign item in the menu bar.
+
+Costbar reads nothing until it is told to. Open the gear menu to add provider
+credentials, which are stored as individual login-Keychain items, or to enable
+the local coding-agent integrations described below. `brew uninstall` leaves
+those Keychain items alone so a reinstall finds them again; `brew uninstall
+--zap costbar` removes Costbar's caches and Application Support directory too.
+If the Claude quota bridge is installed, restore the previous status line from
+Costbar's settings before uninstalling, because that setting lives in
+`~/.claude/settings.json` and is not Costbar's to remove.
+
+To build from source instead, see [Development environment](#development-environment).
+
+## How it is built
+
 The macOS build uses a Zig-first native toolchain:
 
 - Zig is the root build graph and the source of the C ABI.
@@ -78,6 +115,11 @@ Useful build options:
 
 Run `make clean` to remove only generated Zig, Xcode, and XCFramework outputs.
 
+The `Debug` and `ReleaseLocal` configurations sign with an `Apple Development`
+identity, which only this machine trusts. `Release` signs with `Developer ID
+Application` and is used solely by `dist/release.nu`; see
+[docs/RELEASING.md](docs/RELEASING.md).
+
 To benchmark the local Codex and Claude session scanners against real data:
 
 ```sh
@@ -119,6 +161,9 @@ the `cache` mode measures dashboard restore without performing a refresh.
 
 ```text
 build.zig                         Root graph and public build options
+Casks/costbar.rb                  Homebrew cask for the rolling tip build
+dist/release.nu                   Signed, notarized tip release pipeline
+docs/RELEASING.md                 How a tip build is published
 src/build/                        Zig library/XCFramework/Xcode steps
 include/costbar.h                 Stable C ABI
 include/module.modulemap          CostbarKit Clang module
