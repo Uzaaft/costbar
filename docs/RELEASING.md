@@ -45,6 +45,40 @@ keep signing with `Apple Development`.
 
 ## Publishing
 
+Every push to `master` runs the GitHub Actions `Publish tip` workflow. It
+builds the checked-out `HEAD`, signs it with Developer ID, notarizes and
+staples the app, and moves both the `tip` tag and GitHub release to that
+commit. A `workflow_dispatch` run is also available when a publish needs to
+be retried.
+
+### GitHub Actions setup
+
+The workflow expects these repository secrets:
+
+- `APPLE_CERTIFICATE_P12_BASE64`: base64-encoded Developer ID Application
+  certificate exported together with its private key as a `.p12` file.
+- `APPLE_CERTIFICATE_PASSWORD`: password used when exporting that `.p12`.
+- `APPLE_ID`: Apple ID used for notarization.
+- `APPLE_TEAM_ID`: Apple Developer team ID (`FCWK5WR45W` for Costbar).
+- `APPLE_APP_SPECIFIC_PASSWORD`: an app-specific password generated at
+  [appleid.apple.com](https://appleid.apple.com), not the Apple ID password.
+
+To create the certificate secret, create a Certificate Signing Request in
+Keychain Access, create a **Developer ID Application** certificate in the
+Apple Developer portal, install it into the same login Keychain, and export
+the certificate plus private key as `costbar-developer-id.p12`. Encode that
+file without adding a newline:
+
+```sh
+base64 < costbar-developer-id.p12 | pbcopy
+```
+
+Paste the clipboard contents into the
+`APPLE_CERTIFICATE_P12_BASE64` repository secret. Add the other four values
+under **Settings → Secrets and variables → Actions → New repository secret**.
+The workflow imports the certificate into an ephemeral keychain, stores the
+notary profile there, and deletes the keychain after the job.
+
 From a clean checkout of the commit to publish:
 
 ```sh
