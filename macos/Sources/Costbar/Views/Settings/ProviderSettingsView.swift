@@ -10,6 +10,7 @@ enum SettingsDestination: Hashable {
 struct ProviderSettingsView: View {
   @ObservedObject var settings: ProviderSettingsStore
   @ObservedObject var dashboard: DashboardStore
+  @ObservedObject var notch: NotchSettingsStore
   @State private var selection: SettingsDestination?
   @State private var searchText = ""
 
@@ -40,7 +41,7 @@ struct ProviderSettingsView: View {
   private var detail: some View {
     switch selection ?? .general {
     case .general:
-      GeneralSettingsDetail(settings: settings, dashboard: dashboard)
+      GeneralSettingsDetail(settings: settings, dashboard: dashboard, notch: notch)
     case let .provider(provider):
       ProviderAccountSettingsDetail(
         provider: provider,

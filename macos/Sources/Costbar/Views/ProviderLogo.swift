@@ -48,14 +48,25 @@ enum ProviderLogoAsset {
 struct ProviderLogo: View {
   let providerID: String
   var size: CGFloat = 18
+  /// Draws the mark as a silhouette in this color, for chrome that is black
+  /// and white only.
+  var monochrome: Color? = nil
   @Environment(\.colorScheme) private var colorScheme
 
   var body: some View {
     Group {
       if let assetName = ProviderLogoAsset.name(for: providerID, colorScheme: colorScheme) {
-        Image(assetName)
-          .resizable()
-          .scaledToFit()
+        if let monochrome {
+          Image(assetName)
+            .renderingMode(.template)
+            .resizable()
+            .scaledToFit()
+            .foregroundStyle(monochrome)
+        } else {
+          Image(assetName)
+            .resizable()
+            .scaledToFit()
+        }
       } else {
         RoundedRectangle(cornerRadius: size * 0.24, style: .continuous)
           .fill(ProviderTint.color(for: providerID))

@@ -3,6 +3,7 @@ import SwiftUI
 struct GeneralSettingsDetail: View {
   @ObservedObject var settings: ProviderSettingsStore
   @ObservedObject var dashboard: DashboardStore
+  @ObservedObject var notch: NotchSettingsStore
 
   var body: some View {
     SettingsDetailScaffold(
@@ -32,6 +33,21 @@ struct GeneralSettingsDetail: View {
         }
 
         SettingsHelpText("Sources without an override use the all-sources interval.")
+      }
+
+      Section("Notch") {
+        Toggle("Side notch", isOn: $notch.isEnabled)
+
+        Picker("Edge", selection: $notch.edge) {
+          ForEach(NotchEdge.allCases) { edge in
+            Text(edge.label).tag(edge)
+          }
+        }
+        .pickerStyle(.segmented)
+
+        SettingsHelpText(
+          "When enabled, quota rings for Claude, Cursor and Codex slide out from the screen edge when the pointer reaches it. The gear under the rail opens its own settings."
+        )
       }
 
       Section("Credentials") {
