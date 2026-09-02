@@ -76,8 +76,10 @@ base64 < costbar-developer-id.p12 | pbcopy
 Paste the clipboard contents into the
 `APPLE_CERTIFICATE_P12_BASE64` repository secret. Add the other four values
 under **Settings → Secrets and variables → Actions → New repository secret**.
-The workflow imports the certificate into an ephemeral keychain, stores the
-notary profile there, and deletes the keychain after the job.
+The workflow uses `apple-actions/import-codesign-certs` to import the
+certificate into an ephemeral keychain, verifies that a Developer ID identity
+is available, stores the notary profile in the runner's default keychain, and
+lets the action remove its temporary signing material after the job.
 
 Nix dependencies use GitHub's Actions cache service through
 `nix-community/cache-nix-action`. It caches the Nix store using a flake-based
