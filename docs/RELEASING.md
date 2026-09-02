@@ -79,6 +79,11 @@ under **Settings → Secrets and variables → Actions → New repository secret
 The workflow imports the certificate into an ephemeral keychain, stores the
 notary profile there, and deletes the keychain after the job.
 
+Nix dependencies use GitHub's Actions cache service through
+`nix-community/cache-nix-action`. It caches the Nix store using a flake-based
+key and restores the newest compatible cache when the lockfile changes. Cache
+purging is intentionally disabled so cache maintenance cannot block a release.
+
 From a clean checkout of the commit to publish:
 
 ```sh
