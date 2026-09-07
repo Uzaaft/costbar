@@ -5,6 +5,8 @@ struct GeneralSettingsDetail: View {
   @ObservedObject var dashboard: DashboardStore
   @ObservedObject var notch: NotchSettingsStore
 
+  @ObservedObject private var mobileSync = MobileSyncStore.shared
+
   var body: some View {
     SettingsDetailScaffold(
       icon: .symbol("gearshape.fill", tint: WindowPalette.blue),
@@ -48,6 +50,16 @@ struct GeneralSettingsDetail: View {
         SettingsHelpText(
           "When enabled, quota rings for Claude, Cursor and Codex slide out from the screen edge when the pointer reaches it. The gear under the rail opens its own settings."
         )
+      }
+
+      Section("iPhone companion") {
+        Toggle("Sync usage through private iCloud", isOn: Binding(
+          get: { mobileSync.isEnabled },
+          set: { mobileSync.setEnabled($0, dashboard: dashboard.dashboard) }
+        ))
+        .disabled(!MobileSyncStore.isSupported)
+        Text(mobileSync.status).foregroundStyle(.secondary)
+        SettingsHelpText("Uses the same Apple Account on your Mac and iPhone. Shares provider names, costs and quotas; credentials and session contents stay on this Mac. Keep Costbar running for fresh usage. Requires an iCloud-enabled signed build.")
       }
 
       Section("Credentials") {

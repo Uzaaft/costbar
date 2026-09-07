@@ -40,15 +40,19 @@ final class DashboardStore: ObservableObject {
     private let pollingSchedule: () -> PollingSchedule
     private var refreshTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
+    private var refreshRequested = false
+    private let publishSnapshot: (Dashboard) -> Void
 
     init(
         credentials: any DashboardCredentials = CredentialStore(),
         pollingSchedule: @escaping () -> PollingSchedule = { PollingSettings.schedule() },
         automaticallyRefreshes: Bool = true,
+        publishSnapshot: @escaping (Dashboard) -> Void = { MobileSyncStore.shared.publish($0) },
         coreFactory: () throws -> any DashboardCore = { try ProviderAccountDashboardCore() }
     ) {
         self.credentials = credentials
         self.pollingSchedule = pollingSchedule
+        self.publishSnapshot = publishSnapshot
         do {
             let core = try coreFactory()
             self.core = core
@@ -81,7 +85,11 @@ final class DashboardStore: ObservableObject {
     }
 
     func refresh() {
-        guard let core, !isRefreshing else { return }
+        guard let core else { return }
+        guard !isRefreshing else {
+            refreshRequested = true
+            return
+        }
         refreshTask?.cancel()
         isRefreshing = true
         refreshTask = Task { [weak self] in
@@ -91,7 +99,13 @@ final class DashboardStore: ObservableObject {
     }
 
     private func refresh(core: any DashboardCore, sourceIDs: Set<String>?) async {
-        defer { isRefreshing = false }
+        defer {
+            isRefreshing = false
+            if refreshRequested {
+                refreshRequested = false
+                refresh()
+            }
+        }
         let period = Dashboard.Period.currentMonth()
         let hadDashboard = dashboard != nil
         let isFullRefresh = sourceIDs == nil
@@ -143,6 +157,7 @@ final class DashboardStore: ObservableObject {
                 } else {
                     dashboard = refreshedDashboard
                     lastUpdatedAt = .now
+                    publishSnapshot(refreshedDashboard)
                 }
             } catch {
                 errors.append(error.localizedDescription)

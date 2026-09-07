@@ -3,6 +3,12 @@
 Costbar is a macOS menu-bar dashboard for developer infrastructure and digital
 subscription costs. Its provider-neutral core is Zig; its native UI is SwiftUI.
 
+## iPhone companion
+
+The native iPhone companion adds private iCloud usage sync, quota notifications,
+and Home Screen / Lock Screen widgets. See [mobile setup and validation](docs/MOBILE.md)
+for signed builds and setup. The Mac remains the source of usage data.
+
 ## Install
 
 Costbar needs macOS 14 or newer.

@@ -158,7 +158,11 @@ private enum StubError: Error {
 
 @MainActor
 private final class StubDashboardCredentials: DashboardCredentials {
-    func loadAccountData() throws -> [ProviderAccountData] { [] }
+    var loadCount = 0
+    func loadAccountData() throws -> [ProviderAccountData] {
+        loadCount += 1
+        return []
+    }
 }
 
 @MainActor
@@ -173,6 +177,7 @@ private final class StubDashboardCore: DashboardCore {
         errors: nil
     )
     var sourceSelections: [Set<String>?] = []
+    var beforeRefreshCompletes: (() async -> Void)?
 
     init(cached: Dashboard?, snapshot: Dashboard) {
         self.cached = cached
@@ -193,6 +198,7 @@ private final class StubDashboardCore: DashboardCore {
     func refresh(_ request: DashboardRefreshRequest) async throws -> CostbarCore.RefreshReport {
         refreshCount += 1
         sourceSelections.append(request.sourceIDs)
+        await beforeRefreshCompletes?()
         if let refreshError { throw refreshError }
         return refreshReport
     }
@@ -214,4 +220,36 @@ private func dashboardFixture(generatedAtUnix: Int64) -> Dashboard {
         ],
         providers: []
     )
+}
+
+@MainActor
+@Test
+func credentialSaveDuringRefreshQueuesFreshCredentialsAndMobilePublication() async throws {
+    let credentials = StubDashboardCredentials()
+    let core = StubDashboardCore(cached: nil, snapshot: dashboardFixture(generatedAtUnix: 456))
+    var firstRefresh: CheckedContinuation<Void, Never>?
+    core.beforeRefreshCompletes = {
+        if core.refreshCount == 1 {
+            await withCheckedContinuation { firstRefresh = $0 }
+        }
+    }
+    var published = 0
+    let store = DashboardStore(
+        credentials: credentials, automaticallyRefreshes: false,
+        publishSnapshot: { _ in published += 1 }, coreFactory: { core }
+    )
+    let initialLoads = credentials.loadCount
+    store.refresh()
+    for _ in 0..<100 where firstRefresh == nil { await Task.yield() }
+    let continuation = try #require(firstRefresh)
+    // Multiple saves while a request is pending coalesce into one fresh request.
+    store.refresh()
+    store.refresh()
+    #expect(core.refreshCount == 1)
+    continuation.resume()
+    for _ in 0..<100 where store.isRefreshing { await Task.yield() }
+    #expect(core.refreshCount == 2)
+    #expect(credentials.loadCount == initialLoads + 2)
+    #expect(published == 2)
+    #expect(!store.isRefreshing)
 }
