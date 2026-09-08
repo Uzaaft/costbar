@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+        300000000000000000000001 = {isa = PBXBuildFile; fileRef = 300000000000000000000002; };
 		C00000000000000000000001 /* CostbarKit.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = C00000000000000000000024 /* CostbarKit.xcframework */; };
 /* End PBXBuildFile section */
 
@@ -21,6 +22,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+        300000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = ../mobile/CostbarUsageKit.xcframework; sourceTree = "<group>"; };
 		C00000000000000000000021 /* Costbar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Costbar.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C00000000000000000000022 /* CostbarTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = CostbarTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		C00000000000000000000023 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = Resources/Info.plist; sourceTree = "<group>"; };
@@ -38,6 +40,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				C00000000000000000000001 /* CostbarKit.xcframework in Frameworks */,
+                300000000000000000000001,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,6 +78,7 @@
 			isa = PBXGroup;
 			children = (
 				C00000000000000000000024 /* CostbarKit.xcframework */,
+                300000000000000000000002,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";

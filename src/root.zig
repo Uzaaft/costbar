@@ -1,5 +1,6 @@
 pub const model = @import("model.zig");
 pub const money = @import("money.zig");
+pub const usage_policy = @import("usage_policy.zig");
 pub const allowance_pace = @import("allowance_pace.zig");
 pub const http = @import("http.zig");
 pub const provider = @import("provider.zig");
@@ -34,6 +35,7 @@ test {
     _ = model;
     _ = money;
     _ = allowance_pace;
+    _ = usage_policy;
     _ = http;
     _ = provider;
     _ = registry;

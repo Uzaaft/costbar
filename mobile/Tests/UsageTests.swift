@@ -71,3 +71,25 @@ private func snapshot(percent: Double = 85, reset: Date? = now.addingTimeInterva
     #expect(value.highestActiveQuota(at: dates[2]) == nil)
     #expect(value.highestActiveQuota(at: dates[3]) == nil)
 }
+
+@Test func zigBoundaryPreservesFractionalDatesAndHandlesEmptySnapshots() {
+    let date = now.addingTimeInterval(0.25)
+    let empty = UsageSnapshot(version: 1, generatedAt: date, totals: [], providers: [])
+    #expect(empty.highestActiveQuota(at: date) == nil)
+    #expect(empty.timelineDates(from: date) == [date, date.addingTimeInterval(1_800)])
+    #expect(!empty.isStale(at: date.addingTimeInterval(1_799.99)))
+    #expect(empty.isStale(at: date.addingTimeInterval(1_800)))
+    #expect(UsageAlerts.pending(snapshot: snapshot(), threshold: -1, delivered: [], now: now).isEmpty)
+    #expect(UsageAlerts.pending(snapshot: snapshot(), threshold: 101, delivered: [], now: now).isEmpty)
+    #expect(UsageAlerts.pending(snapshot: snapshot(reset: Date(timeIntervalSince1970: 1e30)), threshold: 80, delivered: [], now: now).isEmpty)
+}
+
+@Test func zigAlertIdentityPreservesExistingDeliveredKeys() {
+    let value = snapshot()
+    let expected = "codex/personal/weekly/1800000600/80"
+    #expect(UsageAlerts.pending(snapshot: value, threshold: 80, delivered: [], now: now).first?.id == expected)
+    #expect(UsageAlerts.pending(snapshot: value, threshold: 80, delivered: [expected], now: now).isEmpty)
+    #expect(value.providers.first?.hasFreshUsage(at: now) == true)
+    #expect(value.providers.first?.highestActiveQuota(at: now)?.id == "weekly")
+    #expect(value.providers.first?.highestActiveQuota(at: now.addingTimeInterval(1_800)) == nil)
+}

@@ -31,11 +31,11 @@ pub fn init(
         .out_path = "macos/CostbarKit.xcframework",
         .libraries = switch (target) {
             .universal => &.{.{
-                .library = macos_universal.output,
+                .source = .{ .library = macos_universal.output },
                 .headers = headers,
             }},
             .native => &.{.{
-                .library = macos_native.output,
+                .source = .{ .library = macos_native.output },
                 .headers = headers,
             }},
         },

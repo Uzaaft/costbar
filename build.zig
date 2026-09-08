@@ -44,9 +44,22 @@ pub fn build(b: *std.Build) !void {
     const test_step = b.step("test", "Run the Zig and native macOS tests");
     test_step.dependOn(&run_tests.step);
 
+    const policy_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/usage_api.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }) });
+    const run_policy_tests = b.addRunArtifact(policy_tests);
+    b.step("test-usage", "Run portable usage policy and C ABI tests").dependOn(&run_policy_tests.step);
+    test_step.dependOn(&run_policy_tests.step);
+    const usage_step = b.step("usage-kit", "Build the shared macOS and iOS usage policy XCFramework");
+
     const run_step = b.step("run", "Run the native macOS app");
 
     if (builtin.os.tag.isDarwin() and target.result.os.tag == .macos) {
+        const usage_kit = @import("src/build/UsageXCFramework.zig").create(b, optimize);
+        usage_step.dependOn(usage_kit.step);
+        if (emit_xcframework) b.getInstallStep().dependOn(usage_kit.step);
         const xcframework = buildpkg.CostbarXCFramework.init(
             b,
             optimize,
@@ -59,6 +72,8 @@ pub fn build(b: *std.Build) !void {
             optimize,
             &xcframework,
         );
+        macos_app.build.step.dependOn(usage_kit.step);
+        macos_app.xctest.step.dependOn(usage_kit.step);
         if (emit_macos_app) macos_app.install();
 
         const native_xcframework = buildpkg.CostbarXCFramework.init(
@@ -71,6 +86,8 @@ pub fn build(b: *std.Build) !void {
             optimize,
             &native_xcframework,
         );
+        native_macos_app.build.step.dependOn(usage_kit.step);
+        native_macos_app.xctest.step.dependOn(usage_kit.step);
         run_step.dependOn(&native_macos_app.open.step);
         test_step.dependOn(&native_macos_app.xctest.step);
     } else {

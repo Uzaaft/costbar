@@ -17,3 +17,5 @@ dist/out/
 .build/
 macos/.build/
 DerivedData/
+
+mobile/*.xcframework/

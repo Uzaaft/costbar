@@ -62,6 +62,8 @@ The macOS build uses a Zig-first native toolchain:
 - Zig is the root build graph and the source of the C ABI.
 - Zig produces `macos/CostbarKit.xcframework`, either native-only for fast local
   iteration or universal (`arm64` + `x86_64`) for distribution.
+- Zig also produces `mobile/CostbarUsageKit.xcframework` for shared usage rules
+  on macOS, iPhone, and Simulator (`zig build usage-kit`).
 - A committed Xcode project builds, tests, signs, and bundles the Swift app.
 - `macos/build.nu` invokes Xcode in a clean environment so Nix compiler and SDK
   variables cannot contaminate the Apple toolchain.

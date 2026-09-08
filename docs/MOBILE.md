@@ -1,12 +1,37 @@
 # iPhone companion
 
-Open `mobile/CostbarMobile.xcodeproj` and run `CostbarMobile` on iOS 17 or newer.
+Build the usage policy XCFramework from the repository root first:
+
+```sh
+zig build usage-kit -Doptimize=ReleaseSafe
+```
+
+Then open `mobile/CostbarMobile.xcodeproj` and run `CostbarMobile` on iOS 17 or newer.
+Rebuild the kit after changing `src/usage_policy.zig`, `src/usage_api.zig`, or its
+header. The generated `mobile/CostbarUsageKit.xcframework` is ignored by Git.
 The app embeds small/medium Home Screen widgets and circular/rectangular/inline
 Lock Screen widgets. A watchOS app is not included.
 
 The Mac remains the usage collector. Private CloudKit sync transfers provider
 names, costs and quota windows. Credentials, sessions, prompts and responses stay
 on the Mac. Use one publishing Mac and the same Apple Account on both devices.
+
+## Shared usage policy
+
+`src/usage_policy.zig` owns freshness, quota activity, alert eligibility and alert
+identities. `src/usage_api.zig` exposes those rules, highest-quota selection and
+next semantic transition times through a small C ABI. Inputs use fractional Unix
+seconds; Swift owns all buffers and Zig borrows them only during each call.
+Existing alert identities are preserved so this migration does not resend alerts.
+
+The policy kit contains macOS arm64/x86_64, iOS arm64, and Simulator arm64/x86_64
+static libraries. Both the app and widget link it; the Mac also links it because
+it shares the snapshot model. It excludes provider collection and networking.
+Normal `zig build` and `zig build test` generate the required kit for the Mac.
+
+Swift retains Codable transport, CloudKit, file protection, notification delivery,
+WidgetKit scheduling, UI state, localized text and currency formatting. Zig
+returns decisions and timestamps; it does not call Apple APIs or persist data.
 
 ## Signing and setup
 
@@ -63,6 +88,7 @@ clears the phone cache and alert history.
 ## Validation
 
 ```sh
+zig build usage-kit test-usage -Doptimize=ReleaseSafe
 swift test --scratch-path /tmp/costbar-usage-tests
 xcodebuild -project mobile/CostbarMobile.xcodeproj -scheme CostbarMobile \
   -destination 'generic/platform=iOS Simulator' \
@@ -82,7 +108,8 @@ a live synced snapshot; it finds the widget without changing the Home Screen.
 Screenshots are saved in the test result bundle. These checks verify foreground
 local notification delivery and rendered widget data, not background APNs delivery.
 
-Focused tests cover snapshot versions, multiple currencies, alert deduplication,
+Zig tests cover policy boundaries and the C ABI. Swift-to-Zig tests cover
+snapshot versions, multiple currencies, alert deduplication,
 reset windows, and stale/unavailable/expired/below-threshold suppression.
 Widget tests also verify scheduled quota resets and freshness expiry without
 another network fetch.

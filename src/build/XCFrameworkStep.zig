@@ -13,8 +13,8 @@ pub const Options = struct {
 };
 
 pub const Library = struct {
-    library: LazyPath,
-    headers: LazyPath,
+    source: union(enum) { library: LazyPath, framework: LazyPath },
+    headers: ?LazyPath = null,
     dsym: ?LazyPath = null,
 };
 
@@ -38,10 +38,20 @@ pub fn create(b: *std.Build, opts: Options) *XCFrameworkStep {
         run.has_side_effects = true;
         run.addArgs(&.{ "xcodebuild", "-create-xcframework" });
         for (opts.libraries) |lib| {
-            run.addArg("-library");
-            run.addFileArg(lib.library);
-            run.addArg("-headers");
-            run.addFileArg(lib.headers);
+            switch (lib.source) {
+                .library => |path| {
+                    run.addArg("-library");
+                    run.addFileArg(path);
+                },
+                .framework => |path| {
+                    run.addArg("-framework");
+                    run.addFileArg(path);
+                },
+            }
+            if (lib.headers) |headers| {
+                run.addArg("-headers");
+                run.addFileArg(headers);
+            }
             if (lib.dsym) |dsym| {
                 run.addArg("-debug-symbols");
                 run.addFileArg(dsym);

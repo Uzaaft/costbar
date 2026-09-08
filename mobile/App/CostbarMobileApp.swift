@@ -197,7 +197,7 @@ struct DashboardScreen: View {
                     if !provider.available { Notice(title: "Source unavailable", text: "Check this account in Costbar on your Mac.") }
                     ForEach(provider.quotas) { quota in
                         QuotaRow(quota: quota, now: now,
-                                 stale: !provider.available || now.timeIntervalSince(provider.updatedAt) >= UsageSnapshot.freshnessInterval)
+                                 stale: !provider.hasFreshUsage(at: now))
                     }
                 }.card()
             }
@@ -390,7 +390,7 @@ private struct AgentSummary: View {
     let provider: UsageSnapshot.Provider
     let now: Date
     private var quota: UsageSnapshot.Quota? {
-        provider.quotas.filter { $0.isActive(at: now) }.max { $0.usedPercent < $1.usedPercent }
+        provider.highestActiveQuota(at: now)
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -400,7 +400,7 @@ private struct AgentSummary: View {
                 Image(systemName: "arrow.up.right").font(.caption).foregroundStyle(Palette.muted)
             }
             Text(provider.name.components(separatedBy: " · ").first ?? provider.name).font(.headline).lineLimit(1)
-            if provider.available, now.timeIntervalSince(provider.updatedAt) < UsageSnapshot.freshnessInterval, let quota {
+            if let quota {
                 Text("\(quota.usedPercent.formatted(.number.precision(.fractionLength(0))))%")
                     .font(.system(.title, design: .rounded, weight: .semibold)).monospacedDigit()
                 ProgressView(value: min(quota.usedPercent, 100), total: 100).tint(quota.usedPercent >= 80 ? .orange : Palette.blue)
@@ -463,7 +463,7 @@ private struct ProviderDetail: View {
                                 }.card()
                             }
                             ForEach(provider.quotas) { quota in
-                                QuotaRow(quota: quota, now: context.date, stale: !provider.available || context.date.timeIntervalSince(provider.updatedAt) >= UsageSnapshot.freshnessInterval).card()
+                                QuotaRow(quota: quota, now: context.date, stale: !provider.hasFreshUsage(at: context.date)).card()
                             }
                             if provider.available && provider.totals.isEmpty && provider.quotas.isEmpty {
                                 Notice(title: "No allowance or billing data", text: "This source hasn’t reported a spending total or quota window yet.")
