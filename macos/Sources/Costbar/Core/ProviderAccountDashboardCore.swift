@@ -1,6 +1,14 @@
 import CostbarKit
 import Foundation
 
+protocol AccountUsageCore: Sendable {
+    func snapshot(period: Dashboard.Period) throws -> Dashboard
+    func cachedSnapshot(period: Dashboard.Period, cacheKey: String?) throws -> Dashboard?
+    func refresh(_ request: CoreRefreshRequest) async throws -> CostbarCore.RefreshReport
+}
+
+extension CostbarCore: AccountUsageCore {}
+
 @MainActor
 final class ProviderAccountDashboardCore {
     private struct AccountRequest: Sendable {
@@ -16,6 +24,36 @@ final class ProviderAccountDashboardCore {
         let error: String?
     }
 
+    private struct CodexRequest: Sendable {
+        let account: VisibleCodexAccount?
+        let homePath: String
+        let cacheKey: String
+        var id: String { account.map { "codex/\($0.id)" } ?? "codex" }
+        var displayName: String { account.map { "Codex · \($0.displayName)" } ?? "Codex" }
+
+        func identified(_ report: Dashboard.ProviderReport) -> Dashboard.ProviderReport {
+            if account != nil && report.summary.status == .notConfigured {
+                return unavailable("Usage is unavailable. Check this account’s sign-in on your Mac.")
+            }
+            return report.replacingSummary(report.summary.identified(id: id, displayName: displayName, sourceID: "codex"))
+        }
+
+        func unavailable(_ message: String) -> Dashboard.ProviderReport {
+            .placeholder(summary: .init(id: id, displayName: displayName, sourceID: "codex",
+                kind: "developer_tool", status: .unavailable, errorMessage: message,
+                currency: "", currentCostMicros: 0, projectedCostMicros: nil,
+                creditRemainingMicros: nil, contributesToTotals: false, updatedAtUnix: 0))
+        }
+    }
+
+    private struct CodexOutcome: Sendable {
+        let target: CodexRequest
+        let report: Dashboard.ProviderReport
+        let configuredCount: Int
+        let refreshedCount: Int
+        let error: String?
+    }
+
     private struct MutableTotal {
         let currency: String
         var current: Int64
@@ -25,16 +63,20 @@ final class ProviderAccountDashboardCore {
         var creditComplete: Bool
     }
 
-    private let localCore: CostbarCore
-    private let codexCore: CostbarCore
-    private let codexAccountManager: CodexAccountManager
-    private var accountCores: [String: CostbarCore] = [:]
+    private let localCore: any AccountUsageCore
+    private let loadCodexAccounts: () throws -> CodexAccountSnapshot
+    private let coreFactory: () throws -> any AccountUsageCore
+    private var codexCores: [String: any AccountUsageCore] = [:]
+    private var accountCores: [String: any AccountUsageCore] = [:]
     private var latestDashboard: Dashboard?
 
-    init(codexAccountManager: CodexAccountManager = CodexAccountManager()) throws {
-        localCore = try CostbarCore()
-        codexCore = try CostbarCore()
-        self.codexAccountManager = codexAccountManager
+    init(
+        loadCodexAccounts: @escaping () throws -> CodexAccountSnapshot = { try CodexAccountManager().snapshot() },
+        coreFactory: @escaping () throws -> any AccountUsageCore = { try CostbarCore() }
+    ) throws {
+        localCore = try coreFactory()
+        self.loadCodexAccounts = loadCodexAccounts
+        self.coreFactory = coreFactory
     }
 
     func cachedSnapshot(
@@ -53,14 +95,14 @@ final class ProviderAccountDashboardCore {
             }) else { continue }
             reports.append(report.identified(as: account, type: request.type))
         }
-        if let codexSnapshot = try? codexAccountManager.snapshot(),
-           let cachedCodex = try codexCore.cachedSnapshot(
-               period: period,
-               cacheKey: codexSnapshot.refreshCacheKey
-           ), let report = cachedCodex.providers.first(where: {
-               $0.summary.providerTypeID == "codex" && $0.summary.status != .notConfigured
-           }) {
-            reports.append(report.identified(asCodexAccount: codexSnapshot.activeAccount))
+        if let targets = try? codexRequests() {
+            for target in targets {
+                let core = try codexCore(for: target.id)
+                if let cached = try core.cachedSnapshot(period: period, cacheKey: target.cacheKey),
+                   let report = cached.providers.first(where: { $0.summary.providerTypeID == "codex" && $0.summary.status != .notConfigured }) {
+                    reports.append(target.identified(report))
+                }
+            }
         }
         if let cachedLocal = try localCore.cachedSnapshot(
             period: period,
@@ -73,7 +115,7 @@ final class ProviderAccountDashboardCore {
             })
         }
         if reports.isEmpty,
-           let legacy = try localCore.cachedSnapshot(period: period) {
+           let legacy = try localCore.cachedSnapshot(period: period, cacheKey: nil) {
             var migratedTypes: Set<ProviderAccountType> = []
             for request in Self.accountRequests(in: accountData) {
                 guard migratedTypes.insert(request.type).inserted else { continue }
@@ -108,13 +150,14 @@ final class ProviderAccountDashboardCore {
         var reports = base.providers.filter {
             LocalSource.allSourceIDs.contains($0.summary.providerTypeID)
         }
-        if let codex = try? codexCore.snapshot(period: period),
-           let report = codex.providers.first(where: {
-               $0.summary.providerTypeID == LocalSource.codex.sourceID
-           }),
-           let snapshot = try? codexAccountManager.snapshot() {
-            reports.removeAll { $0.summary.providerTypeID == LocalSource.codex.sourceID }
-            reports.append(report.identified(asCodexAccount: snapshot.activeAccount))
+        if let targets = try? codexRequests() {
+            reports.removeAll { $0.summary.providerTypeID == "codex" }
+            for target in targets {
+                let core = try codexCore(for: target.id)
+                if let report = try core.snapshot(period: period).providers.first(where: { $0.summary.providerTypeID == "codex" }) {
+                    reports.append(target.identified(report))
+                }
+            }
         }
         return Self.dashboard(period: period, generatedAtUnix: base.generatedAtUnix, reports: reports)
     }
@@ -155,30 +198,25 @@ final class ProviderAccountDashboardCore {
         let selectedLocalSources = Set(LocalSource.allCases.filter { source in
             request.sourceIDs?.contains(source.sourceID) ?? true
         })
+        var codexTargets: [CodexRequest]?
         if selectedLocalSources.contains(.codex), request.trackedLocalSources.contains(.codex) {
             do {
-                let snapshot = try codexAccountManager.snapshot()
-                let codexResult = try await codexCore.refresh(.init(
-                    credentials: .empty,
-                    period: request.period,
-                    trackedLocalSources: [.codex],
-                    useGitHubCLI: false,
-                    codexHome: snapshot.refreshHomePath,
-                    codexAccountID: snapshot.activeAccount?.accountID,
-                    sourceIDs: ["codex"],
-                    writesCache: true,
-                    cacheKey: snapshot.refreshCacheKey
-                ))
-                configuredCount += codexResult.configuredCount
-                refreshedCount += codexResult.refreshedCount
-                if let error = codexResult.errors { errors.append(error) }
-                let dashboard = try codexCore.snapshot(period: request.period)
-                if let report = dashboard.providers.first(where: {
-                    $0.summary.providerTypeID == LocalSource.codex.sourceID
-                }) {
-                    replacements[LocalSource.codex.sourceID] = report.identified(
-                        asCodexAccount: snapshot.activeAccount
-                    )
+                let targets = try codexRequests()
+                codexTargets = targets
+                let currentIDs = Set(targets.map(\.id))
+                codexCores = codexCores.filter { currentIDs.contains($0.key) }
+                var collectors: [(CodexRequest, any AccountUsageCore)] = []
+                for target in targets { collectors.append((target, try codexCore(for: target.id))) }
+                await withTaskGroup(of: CodexOutcome.self) { group in
+                    for (target, core) in collectors {
+                        group.addTask { await Self.refreshCodex(target, using: core, request: request) }
+                    }
+                    for await outcome in group {
+                        configuredCount += outcome.configuredCount
+                        refreshedCount += outcome.refreshedCount
+                        if let error = outcome.error { errors.append(error) }
+                        replacements[outcome.target.id] = outcome.report
+                    }
                 }
             } catch {
                 errors.append("Codex: \(error.localizedDescription)")
@@ -223,7 +261,19 @@ final class ProviderAccountDashboardCore {
                 type: accountRequest.type
             )
         }
-        for source in LocalSource.allCases {
+        if request.trackedLocalSources.contains(.codex) {
+            if let targets = codexTargets {
+                for target in targets {
+                    reports.append(replacements[target.id] ?? previous[target.id] ?? target.unavailable("Usage has not refreshed yet."))
+                }
+            } else {
+                reports.append(contentsOf: (latestDashboard?.providers ?? []).filter { $0.summary.providerTypeID == "codex" })
+            }
+        } else if request.sourceIDs == nil {
+            codexCores.removeAll()
+            reports.append(Self.localPlaceholder(.codex))
+        }
+        for source in LocalSource.allCases where source != .codex {
             if let report = replacements[source.sourceID] ?? previous[source.sourceID] {
                 reports.append(report)
             } else if request.sourceIDs == nil {
@@ -245,7 +295,7 @@ final class ProviderAccountDashboardCore {
 
     private nonisolated static func refresh(
         _ accountRequest: AccountRequest,
-        using core: CostbarCore,
+        using core: any AccountUsageCore,
         request: DashboardRefreshRequest
     ) async -> Outcome {
         let account = accountRequest.account
@@ -411,11 +461,48 @@ final class ProviderAccountDashboardCore {
         }
     }
 
-    private func accountCore(for id: String) throws -> CostbarCore {
+    private func accountCore(for id: String) throws -> any AccountUsageCore {
         if let core = accountCores[id] { return core }
-        let core = try CostbarCore()
+        let core = try coreFactory()
         accountCores[id] = core
         return core
+    }
+
+    private func codexCore(for id: String) throws -> any AccountUsageCore {
+        if let core = codexCores[id] { return core }
+        let core = try coreFactory()
+        codexCores[id] = core
+        return core
+    }
+
+    private func codexRequests() throws -> [CodexRequest] {
+        let snapshot = try loadCodexAccounts()
+        guard !snapshot.accounts.isEmpty else {
+            return [.init(account: nil, homePath: snapshot.ambientHomePath, cacheKey: "codex-system")]
+        }
+        let ordered = snapshot.activeAccount.map { selected in
+            [selected] + snapshot.accounts.filter { $0.id != selected.id }
+        } ?? snapshot.accounts
+        return ordered.map { .init(account: $0, homePath: $0.homePath, cacheKey: $0.cacheKey) }
+    }
+
+    private nonisolated static func refreshCodex(
+        _ target: CodexRequest, using core: any AccountUsageCore, request: DashboardRefreshRequest
+    ) async -> CodexOutcome {
+        do {
+            let result = try await core.refresh(.init(credentials: .empty, period: request.period,
+                trackedLocalSources: [.codex], useGitHubCLI: false, codexHome: target.homePath,
+                codexAccountID: target.account?.accountID, sourceIDs: ["codex"],
+                writesCache: true, cacheKey: target.cacheKey))
+            guard let report = try core.snapshot(period: request.period).providers.first(where: { $0.summary.providerTypeID == "codex" }) else {
+                throw CostbarCoreError.missingPayload
+            }
+            return .init(target: target, report: target.identified(report), configuredCount: result.configuredCount,
+                         refreshedCount: result.refreshedCount, error: result.errors.map { "\(target.displayName): \($0)" })
+        } catch {
+            return .init(target: target, report: target.unavailable(error.localizedDescription), configuredCount: 1,
+                         refreshedCount: 0, error: "\(target.displayName): \(error.localizedDescription)")
+        }
     }
 
     private static func accountRequests(
@@ -433,14 +520,6 @@ final class ProviderAccountDashboardCore {
 }
 
 private extension Dashboard.ProviderReport {
-    func identified(asCodexAccount account: VisibleCodexAccount?) -> Dashboard.ProviderReport {
-        replacingSummary(summary.identified(
-            id: LocalSource.codex.sourceID,
-            displayName: account.map { "Codex · \($0.displayName)" } ?? LocalSource.codex.displayName,
-            sourceID: LocalSource.codex.sourceID
-        ))
-    }
-
     func identified(
         as account: ProviderAccount,
         type: ProviderAccountType

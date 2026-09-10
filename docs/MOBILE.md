@@ -14,7 +14,10 @@ Lock Screen widgets. A watchOS app is not included.
 
 The Mac remains the usage collector. Private CloudKit sync transfers provider
 names, costs and quota windows. Credentials, sessions, prompts and responses stay
-on the Mac. Use one publishing Mac and the same Apple Account on both devices.
+on the Mac. Every saved Codex account refreshes independently and syncs as a
+separate source, including accounts whose usage is temporarily unavailable. The
+active Codex selection controls ordering; it does not hide other accounts.
+Use one publishing Mac and the same Apple Account on both devices.
 
 ## Shared usage policy
 

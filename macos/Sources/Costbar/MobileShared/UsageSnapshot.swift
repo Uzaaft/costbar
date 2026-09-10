@@ -41,6 +41,11 @@ struct UsageSnapshot: Codable, Sendable {
         let totals: [Total]
         let quotas: [Quota]
 
+        var showsAllowances: Bool {
+            let sourceID = id.split(separator: "/").first
+            return sourceID == "codex" || sourceID == "claude" || !quotas.isEmpty
+        }
+
         func highestActiveQuota(at now: Date) -> Quota? {
             let snapshot = UsageSnapshot(version: 1, generatedAt: updatedAt, totals: [], providers: [self])
             let index = snapshot.evaluate(at: now).summary.highest_index

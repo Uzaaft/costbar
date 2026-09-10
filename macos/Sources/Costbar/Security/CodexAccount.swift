@@ -49,13 +49,7 @@ struct CodexAccountSnapshot: Equatable, Sendable {
         return accounts.first { $0.id == activeAccountID }
     }
 
-    var refreshHomePath: String {
-        activeAccount?.homePath ?? ambientHomePath
-    }
 
-    var refreshCacheKey: String {
-        activeAccount?.cacheKey ?? "codex-system"
-    }
 }
 
 enum CodexAccountManagerError: Error, LocalizedError, Equatable {

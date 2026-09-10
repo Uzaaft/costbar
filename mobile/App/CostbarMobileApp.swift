@@ -115,7 +115,7 @@ struct DashboardScreen: View {
                             agentList(snapshot, now: context.date)
                         } else {
                             SpendOverview(snapshot: snapshot)
-                            let agents = snapshot.providers.filter { !$0.quotas.isEmpty }
+                            let agents = snapshot.providers.filter(\.showsAllowances)
                             if !agents.isEmpty {
                                 HStack {
                                     sectionTitle("AI allowances")
@@ -178,7 +178,7 @@ struct DashboardScreen: View {
 
     @ViewBuilder
     private func agentList(_ snapshot: UsageSnapshot, now: Date) -> some View {
-        let agents = snapshot.providers.filter { !$0.quotas.isEmpty }
+        let agents = snapshot.providers.filter(\.showsAllowances)
         if agents.isEmpty {
             ContentUnavailableView("No allowances yet", systemImage: "terminal", description: Text("Enable Codex or Claude tracking in Costbar on your Mac. Their quota windows will appear here."))
         } else {
@@ -399,7 +399,7 @@ private struct AgentSummary: View {
                 Spacer()
                 Image(systemName: "arrow.up.right").font(.caption).foregroundStyle(Palette.muted)
             }
-            Text(provider.name.components(separatedBy: " · ").first ?? provider.name).font(.headline).lineLimit(1)
+            ProviderName(name: provider.name)
             if let quota {
                 Text("\(quota.usedPercent.formatted(.number.precision(.fractionLength(0))))%")
                     .font(.system(.title, design: .rounded, weight: .semibold)).monospacedDigit()

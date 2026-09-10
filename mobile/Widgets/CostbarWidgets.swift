@@ -66,8 +66,15 @@ struct UsageWidgetView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         if let quota = highestQuota {
                             Text(quotaTitle(quota)).font(.caption.weight(.semibold)).lineLimit(1)
-                            Text("\(quota.usedPercent.formatted(.number.precision(.fractionLength(0))))% used")
-                                .font(.headline).monospacedDigit()
+                            HStack {
+                                Text("\(quota.usedPercent.formatted(.number.precision(.fractionLength(0))))%")
+                                    .font(.headline).monospacedDigit()
+                                let parts = quota.label.components(separatedBy: " · ")
+                                if parts.count > 2 {
+                                    Text(parts.dropFirst().dropLast().joined(separator: " · ").components(separatedBy: " — ").last ?? "")
+                                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                } else { Text("used").font(.caption2) }
+                            }
                             ProgressView(value: min(quota.usedPercent, 100), total: 100)
                         } else {
                             Text("Costbar · Month to date").font(.caption.weight(.semibold)).lineLimit(1)
@@ -90,11 +97,18 @@ struct UsageWidgetView: View {
                         Text(snapshot.totals.first?.formatted ?? "Usage")
                             .font(.system(.title, design: .rounded, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.6)
                         if let quota = highestQuota {
-                            HStack {
-                                Text(quotaTitle(quota)).lineLimit(1)
-                                Spacer()
-                                Text("\(quota.usedPercent.formatted(.number.precision(.fractionLength(0))))%")
-                            }.font(.caption)
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack {
+                                    Text(quotaTitle(quota)).lineLimit(1)
+                                    Spacer()
+                                    Text("\(quota.usedPercent.formatted(.number.precision(.fractionLength(0))))%")
+                                }.font(.caption)
+                                let parts = quota.label.components(separatedBy: " · ")
+                                if parts.count > 2 {
+                                    Text(parts.dropFirst().dropLast().joined(separator: " · "))
+                                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                }
+                            }
                             ProgressView(value: min(quota.usedPercent, 100), total: 100).tint(quota.usedPercent >= 80 ? .orange : .blue)
                         }
                         Text(snapshot.generatedAt, style: .relative).font(.caption2).foregroundStyle(.secondary)

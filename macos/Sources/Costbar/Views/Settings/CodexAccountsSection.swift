@@ -41,7 +41,7 @@ struct CodexAccountsSection: View {
           }
         }
       }
-      SettingsHelpText("Choose which Codex account Costbar should follow.")
+      SettingsHelpText("All accounts are tracked and synced to your iPhone. Choose which appears first.")
 
       CodexAccountPickerRow(label: "System") {
         if let systemAccountBinding {

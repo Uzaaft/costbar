@@ -269,7 +269,7 @@ final class ProviderSettingsStore: ObservableObject {
         do {
             try codexAccountManager.setActiveAccount(visibleID: id)
             refreshCodexAccounts()
-            message = "Costbar now follows the selected Codex account."
+            message = "Selected Codex account appears first. All accounts remain tracked."
         } catch {
             message = error.localizedDescription
         }
