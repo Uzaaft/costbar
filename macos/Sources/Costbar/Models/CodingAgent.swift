@@ -51,6 +51,10 @@ enum CodingAgent: String, CaseIterable, Identifiable, Sendable {
     }
 
     init?(providerTypeID: String) {
+        if providerTypeID == "cursor-local" {
+            self = .cursor
+            return
+        }
         self.init(rawValue: providerTypeID)
     }
 
@@ -59,12 +63,25 @@ enum CodingAgent: String, CaseIterable, Identifiable, Sendable {
     /// The agent reports worth a ring, in rail order. Accounts that were never
     /// configured are left out; a configured one that failed to refresh keeps
     /// its place so the gap is visible.
+    /// IDs that belong on the quota rail, including Cursor's local allowance
+    /// provider which is distinct from team-admin billing.
+    static let ringTypeIDs: Set<String> = ["claude", "codex", "cursor", "cursor-local"]
+
     static func reports(in dashboard: Dashboard?) -> [Dashboard.ProviderReport] {
         guard let providers = dashboard?.providers else { return [] }
+        let hasCursorLocal = providers.contains {
+            $0.summary.providerTypeID == "cursor-local" && $0.summary.status != .notConfigured
+        }
         return allCases.flatMap { agent in
-            providers.filter {
-                $0.summary.providerTypeID == agent.providerTypeID
-                    && $0.summary.status != .notConfigured
+            providers.filter { report in
+                let typeID = report.summary.providerTypeID
+                let matches = switch agent {
+                case .cursor:
+                    typeID == "cursor-local" || (!hasCursorLocal && typeID == "cursor")
+                default:
+                    typeID == agent.providerTypeID
+                }
+                return matches && report.summary.status != .notConfigured
             }
         }
     }

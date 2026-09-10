@@ -13,8 +13,9 @@ The app embeds small/medium Home Screen widgets and circular/rectangular/inline
 Lock Screen widgets. A watchOS app is not included.
 
 The Mac remains the usage collector. Private CloudKit sync transfers provider
-names, costs and quota windows. Credentials, sessions, prompts and responses stay
-on the Mac. Every saved Codex account refreshes independently and syncs as a
+names, costs and quota windows. Sessions, prompts and responses stay on the Mac.
+Provider credentials never enter the snapshot; on a signed build they sync only
+between Macs through iCloud Keychain (see below). Every saved Codex account refreshes independently and syncs as a
 separate source, including accounts whose usage is temporarily unavailable. The
 active Codex selection controls ordering; it does not hide other accounts.
 Use one publishing Mac and the same Apple Account on both devices.
@@ -52,6 +53,15 @@ xcodebuild -project macos/Costbar.xcodeproj -scheme Costbar \
   CODE_SIGN_ENTITLEMENTS=Resources/MobileSync.entitlements \
   COSTBAR_MOBILE_SYNC_ENABLED=YES -allowProvisioningUpdates build
 ```
+
+The same entitlements file carries the `keychain-access-groups` entry that lets
+Costbar store provider credentials in the data protection keychain as
+synchronizable items, so iCloud Keychain carries them end-to-end encrypted to
+your other Macs. On first launch the signed build moves existing login-keychain
+items across (merging account lists another Mac already synced) and then removes
+the local copies. Unsigned and ad-hoc builds cannot reach that keychain and keep
+credentials in the login keychain on this Mac; **Settings → General → Credentials**
+shows which applies.
 
 This requires a registered development Mac and matching profile. Do not set
 `COSTBAR_MOBILE_SYNC_ENABLED` without signing with the CloudKit entitlement.

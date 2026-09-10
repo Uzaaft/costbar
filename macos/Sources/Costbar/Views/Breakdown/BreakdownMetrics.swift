@@ -254,7 +254,7 @@ private struct AccountMetrics: View {
   }
 
   private var accountType: String {
-    summary.kind.replacingOccurrences(of: "_", with: " ").capitalized
+    summary.kindTitle
   }
 
   private var lastUpdatedText: String {
@@ -285,9 +285,7 @@ private struct MetricLabel: View {
 
   var body: some View {
     Text(title)
-      .font(.system(size: 11, weight: .semibold))
-      .tracking(1.15)
-      .textCase(.uppercase)
+      .font(.subheadline.weight(.semibold))
       .foregroundStyle(WindowPalette.textTertiary)
   }
 }
@@ -300,7 +298,7 @@ private struct MetricValue: View {
     VStack(alignment: .leading, spacing: 8) {
       MetricLabel(title)
       Text(value)
-        .font(.system(size: 25, weight: .light))
+        .font(.title)
         .monospacedDigit()
         .foregroundStyle(WindowPalette.textSecondary)
         .lineLimit(1)
@@ -315,21 +313,9 @@ private struct HeroCurrencyAmount: View {
   let currency: String
 
   var body: some View {
-    let display = CurrencyDisplay(micros: micros, code: currency)
-    HStack(alignment: .firstTextBaseline, spacing: 1) {
-      Text(display.symbol)
-        .font(.system(size: 29, weight: .light))
-        .foregroundStyle(WindowPalette.textSecondary)
-      Text(display.whole)
-        .font(.system(size: 50, weight: .light))
-      Text(display.fraction)
-        .font(.system(size: 31, weight: .light))
-        .foregroundStyle(WindowPalette.textTertiary)
-    }
-    .monospacedDigit()
-    .foregroundStyle(WindowPalette.textPrimary)
-    .lineLimit(1)
-    .minimumScaleFactor(0.65)
+    HeroTextAmount(value: micros.currencyText(code: currency))
+      .contentTransition(.numericText(value: Double(micros)))
+      .animation(.snappy(duration: 0.35), value: micros)
   }
 }
 
@@ -338,9 +324,8 @@ private struct HeroTextAmount: View {
 
   var body: some View {
     Text(value)
-      .font(.system(size: 46, weight: .light))
+      .font(.system(size: 40, weight: .semibold))
       .monospacedDigit()
-      .foregroundStyle(WindowPalette.textPrimary)
       .lineLimit(1)
       .minimumScaleFactor(0.65)
   }

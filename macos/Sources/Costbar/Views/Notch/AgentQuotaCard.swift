@@ -5,9 +5,10 @@ import SwiftUI
 /// pointer toward whichever edge the rail hangs from.
 struct AgentQuotaCard: View {
   let report: Dashboard.ProviderReport
+  var sessions: [AgentSession] = []
   /// The edge the rail is on, which is where the pointer goes. `nil` draws a
   /// plain card, for use inside the popover.
-  var pointer: NotchEdge? = nil
+  var pointer: NotchEdge?
   var now: Date = .now
 
   static let width: CGFloat = 225
@@ -75,6 +76,17 @@ struct AgentQuotaCard: View {
         }
       }
 
+      if !sessions.isEmpty {
+        Divider()
+          .overlay(NotchPalette.hairline)
+          .padding(.vertical, 11)
+        VStack(alignment: .leading, spacing: 8) {
+          ForEach(sessions) { session in
+            sessionRow(session)
+          }
+        }
+      }
+
       if let usage = report.tokenUsage {
         Divider()
           .overlay(NotchPalette.hairline)
@@ -116,6 +128,38 @@ struct AgentQuotaCard: View {
       Text(window.usedPercentText + " Used")
         .font(.system(size: 12, weight: .semibold))
         .foregroundStyle(.white)
+      if let pace = AllowancePace(window: window, now: now), pace.isOverspending,
+         case let .emptiesAt(date) = pace.outlook {
+        Text("Empty " + date.formatted(.relative(presentation: .named)))
+          .font(.system(size: 11))
+          .foregroundStyle(NotchPalette.waiting)
+      }
+    }
+  }
+
+  private func sessionRow(_ session: AgentSession) -> some View {
+    VStack(alignment: .leading, spacing: 2) {
+      HStack(spacing: 6) {
+        Circle()
+          .fill(sessionColor(session.state))
+          .frame(width: 6, height: 6)
+        Text(session.name)
+          .font(.system(size: 12, weight: .semibold))
+          .foregroundStyle(.white)
+          .lineLimit(1)
+      }
+      Text(session.waitingFor ?? session.detail)
+        .font(.system(size: 11))
+        .foregroundStyle(NotchPalette.textSecondary)
+        .lineLimit(1)
+    }
+  }
+
+  private func sessionColor(_ state: AgentActivityState) -> Color {
+    switch state {
+    case .waiting: NotchPalette.waiting
+    case .busy: .white
+    case .success, .idle: NotchPalette.textTertiary
     }
   }
 

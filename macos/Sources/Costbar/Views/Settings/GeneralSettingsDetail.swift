@@ -4,6 +4,7 @@ struct GeneralSettingsDetail: View {
   @ObservedObject var settings: ProviderSettingsStore
   @ObservedObject var dashboard: DashboardStore
   @ObservedObject var notch: NotchSettingsStore
+  @ObservedObject var menuBar: MenuBarSettingsStore
 
   @ObservedObject private var mobileSync = MobileSyncStore.shared
 
@@ -15,7 +16,7 @@ struct GeneralSettingsDetail: View {
       settings: settings,
       dashboard: dashboard
     ) {
-      Section("Refresh schedule") {
+      Section("Refresh Schedule") {
         Picker("All sources", selection: $settings.defaultPollingInterval) {
           ForEach(PollingSettings.intervalOptions) { option in
             Text(option.label).tag(option.seconds)
@@ -37,6 +38,15 @@ struct GeneralSettingsDetail: View {
         SettingsHelpText("Sources without an override use the all-sources interval.")
       }
 
+      Section("Menu Bar") {
+        Picker("Show", selection: $menuBar.metric) {
+          ForEach(MenuBarMetric.allCases) { metric in
+            Text(metric.label).tag(metric)
+          }
+        }
+        SettingsHelpText(menuBar.metric.detail + " Change it here or from the Costbar menu.")
+      }
+
       Section("Notch") {
         Toggle("Side notch", isOn: $notch.isEnabled)
 
@@ -52,7 +62,7 @@ struct GeneralSettingsDetail: View {
         )
       }
 
-      Section("iPhone companion") {
+      Section("iPhone Companion") {
         Toggle("Sync usage through private iCloud", isOn: Binding(
           get: { mobileSync.isEnabled },
           set: { mobileSync.setEnabled($0, dashboard: dashboard.dashboard) }
@@ -63,8 +73,14 @@ struct GeneralSettingsDetail: View {
       }
 
       Section("Credentials") {
-        Text("Provider secrets are kept in the macOS Keychain. Account labels and active selections are stored separately from secret values.")
-          .foregroundStyle(.secondary)
+        switch settings.credentialLocation {
+        case .iCloudKeychain:
+          Label("Synced with iCloud Keychain", systemImage: "key.icloud")
+          SettingsHelpText("Provider keys are end-to-end encrypted and available to Costbar on every Mac signed in to your Apple Account with iCloud Keychain turned on. They are never included in the iPhone usage snapshot.")
+        case .thisMac:
+          Label("Stored in the Keychain on this Mac", systemImage: "key")
+          SettingsHelpText("This build is not signed for iCloud Keychain, so provider keys stay on this Mac. Install a signed build to sync them across your Macs.")
+        }
       }
     }
   }

@@ -10,6 +10,7 @@ func knownProviderIDsMapToBundledAssets() {
         "cloudflare",
         "codex",
         "cursor",
+        "cursor-local",
         "digitalocean",
         "github",
         "openai-api",

@@ -37,6 +37,28 @@ struct Dashboard: Sendable {
         let financials: [FinancialSummary]
 
         var id: String { summary.id }
+
+        /// The window the ring means. Named, never positional: a weekly
+        /// figure must not inherit the session slot after a reset.
+        var headlineWindow: AllowanceWindow? {
+            let typeID = summary.providerTypeID
+            let ids: [String]
+            if typeID == "claude" {
+                ids = ["session", "primary"]
+            } else if typeID == "cursor-local" || typeID == "cursor" {
+                ids = ["auto", "included"]
+            } else if typeID == "codex" || typeID.hasPrefix("codex/") {
+                ids = ["primary"]
+            } else {
+                ids = ["session", "primary", "auto", "included"]
+            }
+            for id in ids {
+                if let window = allowanceWindows.first(where: { $0.id == id }) {
+                    return window
+                }
+            }
+            return nil
+        }
     }
 
     struct FinancialSummary: Sendable {
@@ -194,6 +216,39 @@ struct Dashboard: Sendable {
     var primaryTotal: CurrencyTotal? {
         totals.first(where: { $0.currency == "USD" }) ?? totals.first
     }
+
+    /// The most-used coding-agent allowance, across every window.
+    var hottestAgentQuota: AllowanceWindow? {
+        hottestQuota(for: CodingAgent.allCases)
+    }
+
+    /// Tightest limit across `agents`. Several accounts of one agent
+    /// contribute one pool.
+    func hottestQuota(for agents: [CodingAgent]) -> AllowanceWindow? {
+        CodingAgent.reports(in: self)
+            .filter { report in
+                guard report.summary.status == .available,
+                      let agent = CodingAgent(providerTypeID: report.summary.providerTypeID)
+                else { return false }
+                return agents.contains(agent)
+            }
+            .flatMap(\.allowanceWindows)
+            .filter { $0.usedPercent.isFinite && $0.usedPercent >= 0 }
+            .max(by: { $0.usedPercent < $1.usedPercent })
+    }
+
+    func menuBarTitle(for metric: MenuBarMetric) -> String {
+        if let agents = metric.agents {
+            return hottestQuota(for: agents)?.usedPercentText ?? "—"
+        }
+        return primaryTotal.map { $0.currentCostMicros.currencyText(code: $0.currency) } ?? "—"
+    }
+
+    /// The quota behind the title, or `nil` when the metric is not a quota or
+    /// has no reading.
+    func menuBarPercent(for metric: MenuBarMetric) -> Double? {
+        metric.agents.flatMap(hottestQuota(for:))?.usedPercent
+    }
 }
 
 /// Anything the core reports token counts for. Every conforming type totals the
@@ -304,25 +359,9 @@ extension Int64 {
     }
 }
 
-/// A currency amount split so the symbol and cents can be de-emphasised next to
-/// the whole-unit digits.
-struct CurrencyDisplay {
-    let symbol: String
-    let whole: String
-    let fraction: String
-
-    init(micros: Int64, code: String) {
-        let text = micros.currencyText(code: code)
-        let firstDigit = text.firstIndex(where: \.isNumber) ?? text.startIndex
-        symbol = text[..<firstDigit].trimmingCharacters(in: .whitespaces)
-
-        let number = text[firstDigit...]
-        if let separator = number.lastIndex(of: ".") {
-            whole = String(number[..<separator])
-            fraction = String(number[separator...])
-        } else {
-            whole = String(number)
-            fraction = ""
-        }
-    }
+extension Dashboard.ProviderSummary {
+  /// The account kind for display; "AI" keeps its acronym.
+  var kindTitle: String {
+    kind == "ai" ? "AI" : kind.replacingOccurrences(of: "_", with: " ").capitalized
+  }
 }

@@ -32,18 +32,12 @@ struct ProviderDetailCard: View {
           note(
             "Last refresh failed",
             detail: summary.errorMessage ?? "The provider did not return usage data.",
-            tint: MenuPalette.warning
+            tint: Color.orange
           )
         }
       }
     }
     .frame(width: Self.width)
-    .background(MenuPalette.raised, in: RoundedRectangle(cornerRadius: 13, style: .continuous))
-    .overlay {
-      RoundedRectangle(cornerRadius: 13, style: .continuous)
-        .stroke(Color.white.opacity(0.11), lineWidth: 1)
-    }
-    .environment(\.colorScheme, .dark)
   }
 
   /// Each section is gated on having something to say, so the card never
@@ -75,14 +69,14 @@ struct ProviderDetailCard: View {
       HStack(spacing: 9) {
         ProviderLogo(providerID: summary.providerTypeID, size: 19)
         Text(summary.displayName)
-          .font(.system(size: 14, weight: .semibold))
-          .foregroundStyle(MenuPalette.textPrimary)
+          .font(.headline)
+          .foregroundStyle(Color.primary)
         Spacer(minLength: 8)
         freshness
       }
       Text(subtitle)
-        .font(.system(size: 11))
-        .foregroundStyle(MenuPalette.textTertiary)
+        .font(.subheadline)
+        .foregroundStyle(Color.secondary)
         .lineLimit(1)
         .truncationMode(.middle)
     }
@@ -98,23 +92,20 @@ struct ProviderDetailCard: View {
         .frame(width: 5, height: 5)
       if summary.updatedAtUnix > 0 {
         let updated = Date(timeIntervalSince1970: TimeInterval(summary.updatedAtUnix))
-        TimelineView(.periodic(from: .now, by: 1)) { context in
-          Text(RelativeAge.text(since: updated, now: context.date))
-            .monospacedDigit()
-        }
+        RelativeAgeText(date: updated)
       } else {
         Text("never refreshed")
       }
     }
-    .font(.system(size: 10.5))
-    .foregroundStyle(MenuPalette.textTertiary)
+    .font(.footnote)
+    .foregroundStyle(Color.secondary)
   }
 
   private var statusColor: Color {
     switch summary.status {
     case .available: accent
-    case .notConfigured: MenuPalette.textTertiary
-    case .unavailable: MenuPalette.warning
+    case .notConfigured: Color.secondary
+    case .unavailable: Color.orange
     }
   }
 
@@ -124,7 +115,7 @@ struct ProviderDetailCard: View {
       let services = Set(report.lineItems.map(\.service)).count
       return "\(services) billed \(services == 1 ? "service" : "services")"
     }
-    return summary.kind.replacingOccurrences(of: "_", with: " ").capitalized
+    return summary.kindTitle
   }
 
   // MARK: - Allowances
@@ -133,7 +124,7 @@ struct ProviderDetailCard: View {
     TimelineView(.periodic(from: .now, by: 20)) { context in
       VStack(alignment: .leading, spacing: 13) {
         ForEach(report.allowanceWindows) { window in
-          AllowanceGauge(window: window, now: context.date, accent: accent)
+          AllowanceGauge(window: window, now: context.date)
         }
       }
     }
@@ -165,20 +156,18 @@ struct ProviderDetailCard: View {
   private func statTile(_ stat: Stat) -> some View {
     VStack(alignment: .leading, spacing: 3) {
       Text(stat.title)
-        .font(.system(size: 9.5, weight: .semibold))
-        .tracking(0.8)
-        .textCase(.uppercase)
-        .foregroundStyle(MenuPalette.textTertiary)
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Color.secondary)
       Text(stat.value)
-        .font(.system(size: 17, weight: .regular))
+        .font(.title2)
         .monospacedDigit()
-        .foregroundStyle(MenuPalette.textPrimary)
+        .foregroundStyle(Color.primary)
         .lineLimit(1)
         .minimumScaleFactor(0.7)
       if let detail = stat.detail {
         Text(detail)
-          .font(.system(size: 10))
-          .foregroundStyle(MenuPalette.textTertiary)
+          .font(.footnote)
+          .foregroundStyle(Color.secondary)
           .lineLimit(1)
       }
     }
@@ -186,7 +175,9 @@ struct ProviderDetailCard: View {
   }
 
   private var stats: [Stat] {
-    tracksTokensOnly ? tokenStats : billedStats
+    if tracksTokensOnly { return tokenStats }
+    // A subscription with nothing but quota has no bill to summarize.
+    return summary.contributesToTotals ? billedStats : []
   }
 
   /// Local sources have no bill, so their tokens are the headline figures.
@@ -270,12 +261,12 @@ struct ProviderDetailCard: View {
   private func trendChart(_ points: [TrendPoint]) -> some View {
     VStack(alignment: .leading, spacing: 7) {
       HStack(spacing: 8) {
-        sectionLabel("Last 30 days")
+        sectionLabel("Last 30 Days")
         Spacer(minLength: 6)
         Text("peak \(trendText(points.map(\.value).max() ?? 0))")
-          .font(.system(size: 9.5))
+          .font(.footnote)
           .monospacedDigit()
-          .foregroundStyle(MenuPalette.textTertiary)
+          .foregroundStyle(Color.secondary)
       }
       Sparkline(values: points.map(\.value), accent: accent)
     }
@@ -322,7 +313,7 @@ struct ProviderDetailCard: View {
 
   private func tokenMix(_ segments: [MixSegment]) -> some View {
     VStack(alignment: .leading, spacing: 7) {
-      sectionLabel("Token mix · this month")
+      sectionLabel("Token Mix · This Month")
       GeometryReader { proxy in
         HStack(spacing: 0) {
           ForEach(segments) { segment in
@@ -365,13 +356,13 @@ struct ProviderDetailCard: View {
     VStack(alignment: .leading, spacing: 4) {
       if !modelNames.isEmpty {
         Text(modelNames.joined(separator: " · "))
-          .font(.system(size: 10.5))
-          .foregroundStyle(MenuPalette.textSecondary)
+          .font(.footnote)
+          .foregroundStyle(Color.secondary)
           .lineLimit(2)
       }
       Text(provenanceNote)
-        .font(.system(size: 10))
-        .foregroundStyle(MenuPalette.textTertiary)
+        .font(.footnote)
+        .foregroundStyle(Color.secondary)
         .fixedSize(horizontal: false, vertical: true)
     }
   }
@@ -383,9 +374,9 @@ struct ProviderDetailCard: View {
   }
 
   private var provenanceNote: String {
-    tracksTokensOnly
-      ? "Counted from local session logs · not a subscription bill"
-      : "Reported by the provider's billing API"
+    if tracksTokensOnly { return "Counted from local session logs · not a subscription bill" }
+    if !summary.contributesToTotals { return "Quota reported by the provider · not a bill" }
+    return "Reported by the provider's billing API"
   }
 
   // MARK: - Chrome
@@ -393,7 +384,7 @@ struct ProviderDetailCard: View {
   private func section(@ViewBuilder content: () -> some View) -> some View {
     VStack(alignment: .leading, spacing: 0) {
       Rectangle()
-        .fill(MenuPalette.hairline)
+        .fill(Color(nsColor: .separatorColor))
         .frame(height: 1)
       content()
         .padding(.horizontal, Self.padding)
@@ -403,24 +394,22 @@ struct ProviderDetailCard: View {
 
   private func sectionLabel(_ title: String) -> some View {
     Text(title)
-      .font(.system(size: 9.5, weight: .semibold))
-      .tracking(0.8)
-      .textCase(.uppercase)
-      .foregroundStyle(MenuPalette.textTertiary)
+      .font(.subheadline.weight(.semibold))
+      .foregroundStyle(Color.secondary)
   }
 
   private func note(
     _ title: String,
     detail: String,
-    tint: Color = MenuPalette.textSecondary
+    tint: Color = Color.secondary
   ) -> some View {
     VStack(alignment: .leading, spacing: 4) {
       Text(title)
-        .font(.system(size: 12, weight: .medium))
+        .font(.callout.weight(.medium))
         .foregroundStyle(tint)
       Text(detail)
-        .font(.system(size: 11))
-        .foregroundStyle(MenuPalette.textTertiary)
+        .font(.subheadline)
+        .foregroundStyle(Color.secondary)
         .fixedSize(horizontal: false, vertical: true)
     }
   }
@@ -431,45 +420,33 @@ struct ProviderDetailCard: View {
 private struct AllowanceGauge: View {
   let window: Dashboard.AllowanceWindow
   let now: Date
-  let accent: Color
 
-  private var fraction: Double { min(max(window.usedPercent, 0), 100) / 100 }
   private var pace: AllowancePace? { AllowancePace(window: window, now: now) }
 
   var body: some View {
     VStack(alignment: .leading, spacing: 5) {
       HStack(spacing: 8) {
         Text(window.label)
-          .font(.system(size: 10, weight: .semibold))
-          .tracking(0.8)
-          .textCase(.uppercase)
-          .foregroundStyle(MenuPalette.textSecondary)
+          .font(.subheadline.weight(.semibold))
+          .foregroundStyle(Color.secondary)
         Spacer(minLength: 6)
         Text(window.usedPercentText)
-          .font(.system(size: 11, weight: .medium))
+          .font(.subheadline.weight(.medium))
           .monospacedDigit()
-          .foregroundStyle(MenuPalette.textPrimary)
+          .foregroundStyle(Color.primary)
         if let resets = resetText {
           Text(resets)
-            .font(.system(size: 10))
+            .font(.footnote)
             .monospacedDigit()
-            .foregroundStyle(MenuPalette.textTertiary)
+            .foregroundStyle(Color.secondary)
         }
       }
 
-      GeometryReader { proxy in
-        ZStack(alignment: .leading) {
-          Capsule().fill(MenuPalette.track)
-          Capsule()
-            .fill(barColor)
-            .frame(width: max(fraction > 0 ? 2 : 0, proxy.size.width * fraction))
-        }
-      }
-      .frame(height: 5)
+      UsageBar(fraction: window.usedPercent / 100, tint: barColor, height: 5)
 
       if let outlook = outlookText {
         Text(outlook)
-          .font(.system(size: 10.5))
+          .font(.footnote)
           .foregroundStyle(outlookColor)
           .lineLimit(1)
       }
@@ -477,8 +454,8 @@ private struct AllowanceGauge: View {
   }
 
   private var barColor: Color {
-    if window.usedPercent >= 90 { return MenuPalette.warning }
-    return pace?.isOverspending == true ? MenuPalette.warning.opacity(0.85) : accent
+    if pace?.isOverspending == true, window.usedPercent < 80 { return .orange }
+    return window.statusTint
   }
 
   private var resetText: String? {
@@ -508,8 +485,8 @@ private struct AllowanceGauge: View {
 
   private var outlookColor: Color {
     pace?.isOverspending == true || window.usedPercent >= 100
-      ? MenuPalette.warning
-      : MenuPalette.textSecondary
+      ? Color.orange
+      : Color.secondary
   }
 }
 
@@ -558,8 +535,8 @@ private struct MixLegend: View {
             .fill(segment.category.color)
             .frame(width: 5, height: 5)
           Text("\(segment.category.title) \(segment.percentText)")
-            .font(.system(size: 10))
-            .foregroundStyle(MenuPalette.textTertiary)
+            .font(.footnote)
+            .foregroundStyle(Color.secondary)
             .fixedSize()
         }
       }

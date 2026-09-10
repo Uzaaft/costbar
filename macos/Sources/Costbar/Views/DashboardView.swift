@@ -1,59 +1,180 @@
 import AppKit
 import SwiftUI
 
+/// The menu bar popover: the month's total, then every account grouped by what
+/// it answers — how much quota is left, and where the money went.
 struct DashboardView: View {
   @ObservedObject var store: DashboardStore
+  @ObservedObject var menuBar: MenuBarSettingsStore
   @Environment(\.openWindow) private var openWindow
-  @State private var showsBreakdown = false
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var showsLineItems = false
 
   var body: some View {
     VStack(spacing: 0) {
+      header
+        .padding(.horizontal, 16)
+        .padding(.top, 14)
+        .padding(.bottom, 12)
       content
-      if let dashboard = store.dashboard, dashboard.hasBreakdown {
-        hairline
-        breakdownToggle
-        if showsBreakdown {
-          BreakdownList(dashboard: dashboard)
-        }
-      }
-      hairline
+      Divider()
       footer
     }
-    .frame(width: 340)
-    .background(MenuPalette.background)
-    .environment(\.colorScheme, .dark)
+    .frame(width: 320)
   }
+
+  // MARK: - Header
+
+  private var header: some View {
+    HStack(alignment: .top, spacing: 8) {
+      VStack(alignment: .leading, spacing: 2) {
+        if let total = store.dashboard?.primaryTotal {
+          Text("Month to Date")
+            .font(.subheadline.weight(.medium))
+            .foregroundStyle(.secondary)
+          Text(total.currentCostMicros.currencyText(code: total.currency))
+            .font(.largeTitle.weight(.semibold))
+            .monospacedDigit()
+            .lineLimit(1)
+            .minimumScaleFactor(0.6)
+            // Digits roll to a new total instead of snapping, so a refresh
+            // that moved the number is noticed and one that did not is silent.
+            .contentTransition(.numericText(value: Double(total.currentCostMicros)))
+            .animation(reduceMotion ? nil : .snappy(duration: 0.35), value: total.currentCostMicros)
+          if let projected = total.projectedCostMicros {
+            Text("Projected \(projected.currencyText(code: total.currency)) by month end")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+          }
+          if let credit = total.creditRemainingMicros {
+            Text("\(credit.currencyText(code: total.currency)) prepaid credit left")
+              .font(.subheadline)
+              .foregroundStyle(.secondary)
+          }
+        } else {
+          Text("Costbar")
+            .font(.headline)
+        }
+        status
+          .padding(.top, 2)
+      }
+
+      Spacer(minLength: 8)
+
+      HStack(spacing: 6) {
+        Button {
+          store.refresh()
+        } label: {
+          Label("Refresh", systemImage: "arrow.clockwise")
+            .refreshSpin(isActive: store.isRefreshing)
+        }
+        .keyboardShortcut("r", modifiers: .command)
+        .disabled(store.isRefreshing)
+        .help("Refresh (⌘R)")
+
+        moreMenu
+      }
+      .labelStyle(.iconOnly)
+      .headerButtonStyle()
+    }
+  }
+
+  /// When the figures were fetched, and a warning when they are not current.
+  @ViewBuilder
+  private var status: some View {
+    HStack(spacing: 4) {
+      if store.dataSource == .stale || store.dataSource == .unavailable {
+        Image(systemName: "exclamationmark.triangle.fill")
+          .foregroundStyle(.orange)
+      }
+      if let updated = store.lastUpdatedAt {
+        Text(store.dataSource.statusPrefix)
+        RelativeAgeText(date: updated)
+      } else {
+        Text(store.dataSource.label)
+      }
+    }
+    .font(.subheadline)
+    .foregroundStyle(.secondary)
+    .accessibilityElement(children: .combine)
+  }
+
+  private var moreMenu: some View {
+    Menu {
+      Picker("Show in Menu Bar", selection: $menuBar.metric) {
+        ForEach(MenuBarMetric.allCases) { metric in
+          Text(metric.label).tag(metric)
+        }
+      }
+      .pickerStyle(.menu)
+
+      if store.dashboard?.hasLineItems == true {
+        Toggle("Show Line Items", isOn: lineItemsBinding)
+          .keyboardShortcut("b", modifiers: .command)
+      }
+
+      Divider()
+
+      SettingsLink {
+        Text("Settings…")
+      }
+      .keyboardShortcut(",", modifiers: .command)
+
+      Divider()
+
+      Button("Quit Costbar") {
+        NSApp.terminate(nil)
+      }
+      .keyboardShortcut("q", modifiers: .command)
+    } label: {
+      Label("More", systemImage: "ellipsis")
+    }
+    .menuStyle(.button)
+    .menuIndicator(.hidden)
+    .fixedSize()
+    .help("More")
+  }
+
+  private var lineItemsBinding: Binding<Bool> {
+    Binding(
+      get: { showsLineItems },
+      set: { shows in
+        withAnimation(reduceMotion ? nil : .snappy(duration: 0.25)) { showsLineItems = shows }
+      }
+    )
+  }
+
+  // MARK: - Content
 
   @ViewBuilder
   private var content: some View {
     if let dashboard = store.dashboard {
-      VStack(alignment: .leading, spacing: 0) {
-        if let total = dashboard.primaryTotal {
-          header(total: total)
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-        } else {
-          Text("Subscription usage")
-            .font(.system(size: 15, weight: .semibold))
-            .foregroundStyle(MenuPalette.textPrimary)
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
+      let accounts = dashboard.providers.filter { $0.summary.status != .notConfigured }
+      if accounts.isEmpty {
+        ContentUnavailableView {
+          Label("No Accounts", systemImage: "tray")
+        } description: {
+          Text("Add a provider or turn on a local source to start tracking.")
+        } actions: {
+          SettingsLink {
+            Text("Open Settings…")
+          }
         }
-
-        if let error = store.errorMessage {
-          errorBanner(error)
-            .padding(.horizontal, 16)
-            .padding(.top, 10)
+        .frame(minHeight: 220)
+      } else {
+        // A scroll view takes every point it is offered, which would pad a
+        // short list out to the full height. Only scroll once it overflows.
+        ViewThatFits(in: .vertical) {
+          sections(accounts: accounts, dashboard: dashboard)
+          ScrollView {
+            sections(accounts: accounts, dashboard: dashboard)
+          }
         }
-
-        providerList(dashboard: dashboard, total: dashboard.primaryTotal)
-          .padding(.horizontal, 8)
-          .padding(.top, 14)
-          .padding(.bottom, 8)
+        .frame(maxHeight: listMaxHeight, alignment: .top)
       }
     } else if let error = store.errorMessage {
       ContentUnavailableView(
-        "Unable to load costs",
+        "Unable to Load Costs",
         systemImage: "exclamationmark.triangle",
         description: Text(error)
       )
@@ -61,342 +182,310 @@ struct DashboardView: View {
     } else {
       ProgressView("Loading costs…")
         .controlSize(.small)
-        .font(.system(size: 12))
         .frame(maxWidth: .infinity, minHeight: 220)
     }
   }
 
-  private func header(total: Dashboard.CurrencyTotal) -> some View {
-    VStack(alignment: .leading, spacing: 8) {
-      HStack(spacing: 8) {
-        Text("Month to date")
-          .font(.system(size: 11, weight: .semibold))
-          .tracking(0.9)
-          .textCase(.uppercase)
-          .foregroundStyle(MenuPalette.textSecondary)
-        Spacer(minLength: 8)
-        statusBadge
+  private func sections(accounts: [Dashboard.ProviderReport], dashboard: Dashboard) -> some View {
+    let subscriptions = accounts.filter { !$0.summary.contributesToTotals }
+    let billed = accounts.filter(\.summary.contributesToTotals)
+    return VStack(alignment: .leading, spacing: 14) {
+      if let error = store.errorMessage {
+        errorBanner(error)
       }
-
-      heroAmount(total: total)
-        .padding(.top, 2)
-
-      if let credit = total.creditRemainingMicros {
-        HStack(spacing: 6) {
-          Image(systemName: "creditcard")
-            .font(.system(size: 11))
-          Text("\(credit.currencyText(code: total.currency)) prepaid credit left")
-            .font(.system(size: 12))
+      if !subscriptions.isEmpty {
+        MenuSection("Coding Agents", items: subscriptions) { report in
+          SubscriptionRow(report: report)
         }
-        .foregroundStyle(MenuPalette.textSecondary)
       }
-
-      if let projected = total.projectedCostMicros {
-        Text("projected \(projected.currencyText(code: total.currency))  ·  end of month")
-          .font(.system(size: 12))
-          .foregroundStyle(MenuPalette.textTertiary)
+      if !billed.isEmpty {
+        MenuSection("Spend", items: billed) { report in
+          SpendRow(
+            report: report,
+            aggregateCostMicros: dashboard.primaryTotal?.currentCostMicros ?? 0
+          )
+        }
       }
-    }
-  }
-
-  private func heroAmount(total: Dashboard.CurrencyTotal) -> some View {
-    let parts = CurrencyDisplay(micros: total.currentCostMicros, code: total.currency)
-    return HStack(alignment: .firstTextBaseline, spacing: 1) {
-      Text(parts.symbol)
-        .font(.system(size: 22, weight: .light))
-        .foregroundStyle(MenuPalette.textSecondary)
-      Text(parts.whole)
-        .font(.system(size: 44, weight: .light))
-        .monospacedDigit()
-        .foregroundStyle(MenuPalette.textPrimary)
-      Text(parts.fraction)
-        .font(.system(size: 26, weight: .light))
-        .monospacedDigit()
-        .foregroundStyle(MenuPalette.textPrimary.opacity(0.62))
-    }
-    .lineLimit(1)
-    .minimumScaleFactor(0.6)
-  }
-
-  private var statusBadge: some View {
-    HStack(spacing: 6) {
-      Circle()
-        .fill(statusColor)
-        .frame(width: 6, height: 6)
-      TimelineView(.periodic(from: .now, by: 1)) { context in
-        Text(statusText(now: context.date))
-          .font(.system(size: 11.5))
-          .monospacedDigit()
-          .foregroundStyle(MenuPalette.textSecondary)
+      if showsLineItems, dashboard.hasLineItems {
+        MenuSection("Line Items", items: accounts.filter { !$0.lineItems.isEmpty }) { report in
+          LineItemGroup(report: report)
+        }
+        .transition(.opacity)
       }
     }
-  }
-
-  private var statusColor: Color {
-    switch store.dataSourceLabel {
-    case "live": MenuPalette.live
-    case "stale": .orange
-    default: MenuPalette.textTertiary
-    }
-  }
-
-  private func statusText(now: Date) -> String {
-    guard let updated = store.lastUpdatedAt else { return store.dataSourceLabel }
-    return "\(store.dataSourceLabel) · \(RelativeAge.text(since: updated, now: now))"
+    .padding(.horizontal, 12)
+    .padding(.bottom, 12)
   }
 
   private func errorBanner(_ message: String) -> some View {
-    HStack(alignment: .top, spacing: 6) {
-      Image(systemName: "exclamationmark.triangle.fill")
-        .font(.system(size: 10))
+    Label {
       Text(message)
-        .font(.system(size: 11))
         .lineLimit(3)
+    } icon: {
+      Image(systemName: "exclamationmark.triangle.fill")
+        .foregroundStyle(.orange)
     }
-    .foregroundStyle(.orange)
+    .font(.subheadline)
+    .padding(10)
+    .frame(maxWidth: .infinity, alignment: .leading)
+    .platter()
+    .help(message)
   }
 
-  private func providerList(
-    dashboard: Dashboard,
-    total: Dashboard.CurrencyTotal?
-  ) -> some View {
-    VStack(spacing: 1) {
-      ForEach(dashboard.providers) { report in
-        ProviderRow(
-          report: report,
-          aggregateCostMicros: total?.currentCostMicros ?? 0
-        )
-      }
-    }
+  private var listMaxHeight: CGFloat {
+    let screen = NSScreen.main?.visibleFrame.height ?? 800
+    return min(520, max(280, screen * 0.6))
   }
 
-  private var breakdownToggle: some View {
-    Button {
-      withAnimation(.easeOut(duration: 0.12)) { showsBreakdown.toggle() }
-    } label: {
-      HStack(spacing: 8) {
-        Text(showsBreakdown ? "Hide breakdown" : "Open breakdown")
-          .font(.system(size: 13))
-        Spacer(minLength: 0)
-        Text("⌘B")
-          .font(.system(size: 11.5, design: .monospaced))
-          .foregroundStyle(MenuPalette.textTertiary)
-        Image(systemName: showsBreakdown ? "chart.bar.xaxis" : "chart.bar")
-          .font(.system(size: 13))
-      }
-      .padding(.horizontal, 8)
-      .padding(.vertical, 7)
-      .contentShape(Rectangle())
-    }
-    .buttonStyle(.plain)
-    .keyboardShortcut("b", modifiers: .command)
-    .hoverHighlight()
-    .foregroundStyle(MenuPalette.textPrimary.opacity(0.85))
-    .padding(.horizontal, 8)
-    .padding(.vertical, 5)
-  }
+  // MARK: - Footer
 
   private var footer: some View {
-    HStack(spacing: 2) {
-      Button {
-        store.refresh()
-      } label: {
-        HStack(spacing: 7) {
-          if store.isRefreshing {
-            ProgressView()
-              .controlSize(.small)
-              .scaleEffect(0.55)
-              .frame(width: 11, height: 11)
-          }
-          Text(store.isRefreshing ? "Refreshing…" : "Refresh")
-            .font(.system(size: 13))
-          Spacer(minLength: 0)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 7)
+    Button {
+      openWindow(id: "dashboard")
+      NSApp.activate()
+    } label: {
+      Text("Open Breakdown Window")
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .contentShape(Rectangle())
-      }
-      .buttonStyle(.plain)
-      .keyboardShortcut("r", modifiers: .command)
-      .disabled(store.isRefreshing)
-      .hoverHighlight()
-
-      Button {
-        openWindow(id: "dashboard")
-        NSApplication.shared.activate(ignoringOtherApps: true)
-      } label: {
-        iconLabel("macwindow")
-      }
-      .buttonStyle(.plain)
-      .hoverHighlight(cornerRadius: 6)
-      .help("Open dashboard")
-
-      SettingsLink {
-        iconLabel("gearshape")
-      }
-      .buttonStyle(.plain)
-      .hoverHighlight(cornerRadius: 6)
-      .help("Provider settings")
-
-      Button {
-        NSApplication.shared.terminate(nil)
-      } label: {
-        iconLabel("power")
-      }
-      .buttonStyle(.plain)
-      .hoverHighlight(cornerRadius: 6)
-      .help("Quit Costbar")
     }
-    .foregroundStyle(MenuPalette.textPrimary.opacity(0.85))
-    .padding(.horizontal, 8)
-    .padding(.vertical, 5)
-  }
-
-  private func iconLabel(_ systemName: String) -> some View {
-    Image(systemName: systemName)
-      .font(.system(size: 13))
-      .frame(width: 26, height: 26)
-      .contentShape(Rectangle())
-  }
-
-  private var hairline: some View {
-    Rectangle()
-      .fill(MenuPalette.hairline)
-      .frame(height: 1)
+    .buttonStyle(.plain)
+    .hoverHighlight(cornerRadius: 6)
+    .padding(6)
   }
 }
 
-private struct ProviderRow: View {
-  /// Long enough that skimming the list does not flash cards, short enough that
-  /// pausing on a row feels like it answered on its own.
-  private static let hoverDelay = Duration.milliseconds(300)
+extension DashboardDataSource {
+  /// Leads the "… 3 min. ago" status line.
+  fileprivate var statusPrefix: String {
+    switch self {
+    case .live: "Updated"
+    case .cached: "Cached"
+    case .stale: "Out of date · updated"
+    case .notConfigured, .unavailable: "Last updated"
+    }
+  }
+}
 
+/// A titled group of rows on one platter, separated by inset dividers.
+private struct MenuSection<Item: Identifiable, Row: View>: View {
+  let title: String
+  let items: [Item]
+  @ViewBuilder let row: (Item) -> Row
+
+  init(_ title: String, items: [Item], @ViewBuilder row: @escaping (Item) -> Row) {
+    self.title = title
+    self.items = items
+    self.row = row
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 6) {
+      Text(title)
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.leading, 10)
+        .accessibilityAddTraits(.isHeader)
+      VStack(spacing: 0) {
+        ForEach(items) { item in
+          row(item)
+          if item.id != items.last?.id {
+            Divider()
+              .padding(.leading, 10)
+          }
+        }
+      }
+      .platter()
+    }
+  }
+}
+
+/// The logo, name and one line of context that start every account row.
+private struct AccountLabel<Trailing: View>: View {
+  let summary: Dashboard.ProviderSummary
+  let subtitle: String?
+  @ViewBuilder let trailing: Trailing
+
+  var body: some View {
+    HStack(spacing: 10) {
+      ProviderLogo(providerID: summary.providerTypeID, size: 20)
+      VStack(alignment: .leading, spacing: 1) {
+        Text(summary.displayName)
+          .lineLimit(1)
+        if let subtitle {
+          Text(subtitle)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+      }
+      Spacer(minLength: 8)
+      trailing
+    }
+  }
+}
+
+/// What an account shows in place of its figures when it has none.
+private struct AccountStatusSymbol: View {
+  let status: Dashboard.ProviderSummary.Status
+
+  var body: some View {
+    switch status {
+    case .available:
+      EmptyView()
+    case .notConfigured:
+      Image(systemName: "gearshape")
+        .foregroundStyle(.secondary)
+        .accessibilityLabel("Not configured")
+    case .unavailable:
+      Image(systemName: "exclamationmark.triangle.fill")
+        .foregroundStyle(.orange)
+        .accessibilityLabel("Unavailable")
+    }
+  }
+}
+
+/// A coding agent or local source: nothing is billed, so the row is about how
+/// much of each allowance is gone and when it comes back.
+private struct SubscriptionRow: View {
+  let report: Dashboard.ProviderReport
+
+  private var summary: Dashboard.ProviderSummary { report.summary }
+
+  /// Headline first, then the other most-used window. The hover card has the
+  /// rest; listing every window here is what overflowed the popover.
+  private var visibleAllowances: [Dashboard.AllowanceWindow] {
+    guard summary.status == .available else { return [] }
+    if let headline = report.headlineWindow {
+      let extra = report.allowanceWindows
+        .filter { $0.id != headline.id }
+        .max(by: { $0.usedPercent < $1.usedPercent })
+      return extra.map { [headline, $0] } ?? [headline]
+    }
+    return Array(
+      report.allowanceWindows.sorted { $0.usedPercent > $1.usedPercent }.prefix(2)
+    )
+  }
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      AccountLabel(summary: summary, subtitle: subtitle) {
+        if summary.status == .available, let tokens = report.tokenUsage {
+          Text(TokenFormat.withUnit(tokens.totalTokens))
+            .font(.subheadline)
+            .monospacedDigit()
+            .foregroundStyle(.secondary)
+        } else {
+          AccountStatusSymbol(status: summary.status)
+        }
+      }
+
+      if !visibleAllowances.isEmpty {
+        TimelineView(.periodic(from: .now, by: 30)) { context in
+          VStack(alignment: .leading, spacing: 8) {
+            ForEach(visibleAllowances) { window in
+              AllowanceMeter(window: window, now: context.date)
+            }
+          }
+        }
+      }
+    }
+    .padding(10)
+    .contentShape(Rectangle())
+    .hoverCard {
+      ProviderDetailCard(report: report)
+    }
+    .accessibilityElement(children: .combine)
+  }
+
+  private var subtitle: String? {
+    switch summary.status {
+    case .notConfigured: "Not configured"
+    case .unavailable: summary.errorMessage ?? "Unavailable"
+    case .available: report.allowanceWindows.isEmpty ? report.tokenUsage?.source : nil
+    }
+  }
+}
+
+/// One allowance window: its name, how much is used, when it resets.
+private struct AllowanceMeter: View {
+  let window: Dashboard.AllowanceWindow
+  let now: Date
+
+  var body: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        Text(window.label)
+          .lineLimit(1)
+        Spacer(minLength: 8)
+        if let reset = resetText {
+          Text(reset)
+            .foregroundStyle(.secondary)
+        }
+        Text(window.usedPercentText)
+          .fontWeight(.medium)
+          .monospacedDigit()
+          .contentTransition(.numericText(value: window.usedPercent))
+      }
+      .font(.subheadline)
+
+      UsageBar(fraction: window.usedPercent / 100, tint: window.statusTint)
+    }
+    .accessibilityElement(children: .ignore)
+    .accessibilityLabel(window.label)
+    .accessibilityValue([window.usedPercentText + " used", resetText].compactMap(\.self).joined(separator: ", "))
+  }
+
+  /// "resets in 1h 59m". A clock time alone cannot tell this afternoon from
+  /// three days away, which is the difference that matters.
+  private var resetText: String? {
+    guard let reset = window.resetsAtUnix else { return nil }
+    let remaining = Date(timeIntervalSince1970: TimeInterval(reset)).timeIntervalSince(now)
+    guard remaining > 0 else { return nil }
+    return "resets in \(DurationFormat.compact(remaining))"
+  }
+}
+
+/// A billed account: what it has cost this month and its share of the total.
+private struct SpendRow: View {
   let report: Dashboard.ProviderReport
   let aggregateCostMicros: Int64
-
-  @State private var isHovering = false
-  @State private var showsDetail = false
 
   private var summary: Dashboard.ProviderSummary { report.summary }
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 7) {
-      HStack(alignment: .center, spacing: 11) {
-        ProviderLogo(providerID: summary.providerTypeID)
-
-        VStack(alignment: .leading, spacing: 1) {
-          Text(summary.displayName)
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(MenuPalette.textPrimary)
-          Text(subtitle)
-            .font(.system(size: 11.5))
-            .foregroundStyle(MenuPalette.textSecondary)
-            .lineLimit(1)
-            .truncationMode(.tail)
-        }
-
-        Spacer(minLength: 10)
-
-        VStack(alignment: .trailing, spacing: 1) {
-          switch summary.status {
-          case .available:
-            Text(providerAmount)
-              .font(.system(size: 13, weight: .medium, design: .monospaced))
-              .foregroundStyle(MenuPalette.textPrimary)
-            Text(summary.contributesToTotals ? percentageText : "local usage")
-              .font(.system(size: 11, design: .monospaced))
-              .foregroundStyle(MenuPalette.textTertiary)
-          case .notConfigured:
-            Image(systemName: "gearshape")
-              .font(.system(size: 12))
-              .foregroundStyle(MenuPalette.textTertiary)
-          case .unavailable:
-            Image(systemName: "exclamationmark.triangle.fill")
-              .font(.system(size: 12))
-              .foregroundStyle(.orange)
-          }
-        }
-      }
-
+    AccountLabel(summary: summary, subtitle: subtitle) {
       if summary.status == .available {
-        ForEach(report.allowanceWindows.prefix(3)) { window in
-          allowanceRow(window)
+        VStack(alignment: .trailing, spacing: 1) {
+          Text(summary.currentCostMicros.currencyText(code: summary.currency))
+            .contentTransition(.numericText(value: Double(summary.currentCostMicros)))
+          Text(shareText)
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
         }
+        .monospacedDigit()
+        .animation(.snappy(duration: 0.35), value: summary.currentCostMicros)
+      } else {
+        AccountStatusSymbol(status: summary.status)
       }
     }
-    .padding(.horizontal, 10)
-    .padding(.vertical, 7)
+    .padding(10)
     .contentShape(Rectangle())
-    .hoverHighlight()
-    .onHover { hovering in
-      isHovering = hovering
-      if !hovering { showsDetail = false }
-    }
-    .task(id: isHovering) {
-      guard isHovering else { return }
-      try? await Task.sleep(for: Self.hoverDelay)
-      guard !Task.isCancelled else { return }
-      showsDetail = true
-    }
-    .hoverCard(isPresented: showsDetail) {
+    .hoverCard {
       ProviderDetailCard(report: report)
     }
+    .accessibilityElement(children: .combine)
   }
 
-  private func allowanceRow(_ window: Dashboard.AllowanceWindow) -> some View {
-    VStack(alignment: .leading, spacing: 3) {
-      HStack(spacing: 8) {
-        Text(window.label)
-          .lineLimit(1)
-        Spacer(minLength: 8)
-        Text(allowanceDetail(window))
-          .monospacedDigit()
-      }
-      .font(.system(size: 10.5))
-      .foregroundStyle(MenuPalette.textTertiary)
-
-      ProgressView(value: min(max(window.usedPercent, 0), 100), total: 100)
-        .progressViewStyle(.linear)
-        .tint(window.usedPercent >= 90 ? .orange : accentColor)
-        .controlSize(.mini)
-    }
-    .padding(.leading, 20)
-  }
-
-  private func allowanceDetail(_ window: Dashboard.AllowanceWindow) -> String {
-    guard let reset = window.resetsAtUnix else { return window.usedPercentText }
-    let time = Date(timeIntervalSince1970: TimeInterval(reset)).formatted(
-      date: .omitted,
-      time: .shortened
-    )
-    return "\(window.usedPercentText) · \(time)"
-  }
-
-  private var accentColor: Color {
-    ProviderTint.color(for: summary.id)
-  }
-
-  private var percentageText: String {
+  private var shareText: String {
     guard aggregateCostMicros > 0 else { return "0%" }
-    let percentage = Double(summary.currentCostMicros) / Double(aggregateCostMicros)
-    return percentage.formatted(
+    let share = Double(summary.currentCostMicros) / Double(aggregateCostMicros)
+    return share.formatted(
       .percent
         .precision(.fractionLength(0))
         .locale(MoneyFormat.locale)
     )
-  }
-
-  private var providerAmount: String {
-    if !summary.contributesToTotals, let tokens = report.tokenUsage {
-      return tokens.totalTokens.formatted(
-        .number.notation(.compactName).precision(.fractionLength(0...1))
-      ) + " tok"
-    }
-    if report.financials.count > 1 {
-      return summary.currentCostMicros.currencyText(code: summary.currency)
-    }
-    return summary.currentCostMicros.decimalText()
   }
 
   private var subtitle: String {
@@ -436,47 +525,25 @@ private struct ProviderRow: View {
       return "\(credit.currencyText(code: summary.currency)) credit left"
     }
     if let usage = report.tokenUsage {
-      let tokens = usage.totalTokens.formatted(.number.notation(.compactName))
-      return "\(tokens) tokens · \(usage.source)"
+      return "\(TokenFormat.withUnit(usage.totalTokens)) · \(usage.source)"
     }
     return "No active resources"
   }
 }
 
-/// The line items behind the headline number, grouped by billed product.
-private struct BreakdownList: View {
-  let dashboard: Dashboard
+/// One account's line items behind the headline number, grouped by billed
+/// product.
+private struct LineItemGroup: View {
+  let report: Dashboard.ProviderReport
 
   var body: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 14) {
-        ForEach(dashboard.providers.filter { !$0.lineItems.isEmpty }) { report in
-          providerBreakdown(report)
-        }
-      }
-      .padding(.horizontal, 16)
-      .padding(.vertical, 12)
-    }
-    .frame(maxHeight: 260)
-    .background(Color.black.opacity(0.16))
-  }
-
-  @ViewBuilder
-  private func providerBreakdown(_ report: Dashboard.ProviderReport) -> some View {
-    VStack(alignment: .leading, spacing: 4) {
+    VStack(alignment: .leading, spacing: 6) {
       HStack(spacing: 8) {
         ProviderLogo(providerID: report.summary.providerTypeID, size: 14)
         Text(report.summary.displayName)
-          .font(.system(size: 11, weight: .semibold))
-          .tracking(0.8)
-          .textCase(.uppercase)
+          .fontWeight(.medium)
         Spacer(minLength: 8)
-        Text(report.summary.currentCostMicros.currencyText(code: report.summary.currency))
-          .font(.system(size: 11, weight: .semibold, design: .monospaced))
       }
-      .foregroundStyle(MenuPalette.textSecondary)
-      .padding(.bottom, 2)
-
       ForEach(groups(of: report)) { group in
         if group.items.count > 1 {
           row(
@@ -486,14 +553,14 @@ private struct BreakdownList: View {
             currency: group.currency,
             emphasized: true
           )
-          ForEach(Array(group.items.enumerated()), id: \.offset) { _, item in
+          ForEach(group.items) { item in
             row(
               label: item.description,
               detail: item.detail,
               amountMicros: item.amountMicros,
-              currency: item.currency,
-              indent: 12
+              currency: item.currency
             )
+            .padding(.leading, 12)
           }
         } else if let item = group.items.first {
           row(
@@ -505,37 +572,35 @@ private struct BreakdownList: View {
         }
       }
     }
+    .padding(10)
   }
 
   private func row(
     label: String,
     detail: String?,
     amountMicros: Int64,
-    currency: String? = nil,
-    emphasized: Bool = false,
-    indent: CGFloat = 0
+    currency: String?,
+    emphasized: Bool = false
   ) -> some View {
     HStack(alignment: .firstTextBaseline, spacing: 8) {
       VStack(alignment: .leading, spacing: 1) {
         Text(label)
-          .font(.system(size: 12, weight: emphasized ? .medium : .regular))
-          .foregroundStyle(MenuPalette.textPrimary.opacity(emphasized ? 1 : 0.82))
+          .fontWeight(emphasized ? .medium : .regular)
         if let detail {
           Text(detail)
-            .font(.system(size: 10.5))
-            .foregroundStyle(MenuPalette.textTertiary)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
         }
       }
       .lineLimit(1)
-      .truncationMode(.tail)
 
       Spacer(minLength: 8)
 
       Text(currency.map { amountMicros.currencyText(code: $0) } ?? amountMicros.decimalText())
-        .font(.system(size: 12, design: .monospaced))
-        .foregroundStyle(emphasized ? MenuPalette.textPrimary : MenuPalette.textSecondary)
+        .monospacedDigit()
+        .foregroundStyle(emphasized ? .primary : .secondary)
     }
-    .padding(.leading, indent)
+    .font(.subheadline)
   }
 
   private struct Group: Identifiable {
@@ -543,7 +608,7 @@ private struct BreakdownList: View {
     let id: String
     let items: [Dashboard.CostLineItem]
 
-    var amountMicros: Int64 { items.reduce(0) { $0 + $1.amountMicros } }
+    var amountMicros: Int64 { items.map(\.amountMicros).saturatingSum }
     var currency: String? {
       let currencies = Set(items.compactMap(\.currency))
       return currencies.count == 1 ? currencies.first : nil
@@ -558,8 +623,7 @@ private struct BreakdownList: View {
 }
 
 extension Dashboard {
-  fileprivate var hasBreakdown: Bool {
+  fileprivate var hasLineItems: Bool {
     providers.contains { !$0.lineItems.isEmpty }
   }
 }
-

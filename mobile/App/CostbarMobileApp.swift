@@ -10,7 +10,6 @@ struct CostbarMobileApp: App {
     var body: some Scene {
         WindowGroup {
             DashboardScreen(store: store)
-                .preferredColorScheme(.dark)
                 .task(id: scenePhase) {
                     guard scenePhase == .active else { return }
                     await store.connect()
@@ -33,12 +32,14 @@ private enum Layout {
     static let cornerRadius: CGFloat = 16
 }
 
+/// System colors throughout, so the app follows Light and Dark Mode, Increase
+/// Contrast, and the Liquid Glass tab bar and toolbars draw over real content.
 private enum Palette {
-    static let background = Color(red: 0.075, green: 0.078, blue: 0.09)
-    static let raised = Color(red: 0.12, green: 0.125, blue: 0.14)
-    static let blue = Color(red: 0.24, green: 0.60, blue: 1)
-    static let green = Color(red: 0.32, green: 0.81, blue: 0.64)
-    static let muted = Color.white.opacity(0.48)
+    static let background = Color(.systemGroupedBackground)
+    static let raised = Color(.secondarySystemGroupedBackground)
+    static let blue = Color.blue
+    static let green = Color.green
+    static let muted = Color.secondary
 }
 
 private enum MobileTab: Hashable { case overview, usage, settings }
@@ -78,6 +79,8 @@ struct DashboardScreen: View {
                 .tabItem { Label("Settings", systemImage: "slider.horizontal.3") }.tag(MobileTab.settings)
         }
         .tint(Palette.blue)
+        .sidebarAdaptableTabs()
+        .minimizingTabBarOnScroll()
         .sheet(item: $selectedProvider) { provider in
             ProviderDetail(providerID: provider.id, store: store)
         }
@@ -118,7 +121,7 @@ struct DashboardScreen: View {
                             let agents = snapshot.providers.filter(\.showsAllowances)
                             if !agents.isEmpty {
                                 HStack {
-                                    sectionTitle("AI allowances")
+                                    sectionTitle("AI Allowances")
                                     Spacer()
                                     Button("See all", systemImage: "arrow.right") { tab = .usage }
                                         .font(.subheadline)
@@ -132,7 +135,7 @@ struct DashboardScreen: View {
                                 }
                             }
                             HStack {
-                                sectionTitle("All sources")
+                                sectionTitle("All Sources")
                                 Spacer()
                                 Text("\(snapshot.providers.filter(\.available).count) of \(snapshot.providers.count) reporting")
                                     .font(.caption).foregroundStyle(Palette.muted)
@@ -215,14 +218,14 @@ struct DashboardScreen: View {
             Text("Connect to Costbar on your Mac to see spending, follow AI allowances, and get usage alerts.")
                 .foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 20) {
-                setupStep("1", title: "Use the same Apple Account", detail: "Sign in to iCloud on your Mac and iPhone.")
+                setupStep("1", title: "Use the same Apple Account", detail: "Sign in to iCloud on your Mac and this device.")
                 setupStep("2", title: "Enable sync on your Mac", detail: "Costbar → Settings → General → iPhone companion.")
                 setupStep("3", title: "Keep an eye on usage", detail: "Add a widget or turn on quota alerts in Settings.")
             }.card()
             if let message = store.message { Notice(title: "Connection status", text: message) }
             Button { Task { await store.connect() } } label: {
                 Text(store.refreshing ? "Connecting…" : "Connect to my Mac").frame(maxWidth: .infinity).padding(.vertical, 8)
-            }.buttonStyle(.borderedProminent).buttonBorderShape(.roundedRectangle(radius: Layout.cornerRadius)).disabled(store.refreshing)
+            }.prominentGlassButton().disabled(store.refreshing)
         }
     }
 
@@ -248,7 +251,7 @@ struct DashboardScreen: View {
                     ForEach([50, 75, 80, 90, 95, 100], id: \.self) { Text("\($0)%").tag($0) }
                 }.disabled(!store.alertsEnabled)
                 if store.notificationsDenied {
-                    Button("Allow notifications in iPhone Settings", systemImage: "arrow.up.forward.app") {
+                    Button("Allow notifications in the Settings app", systemImage: "arrow.up.forward.app") {
                         if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
                     }
                 }
@@ -258,7 +261,7 @@ struct DashboardScreen: View {
                 if let feedback = store.notificationFeedback {
                     Text(feedback).font(.caption).foregroundStyle(.secondary)
                 }
-            } header: { Text("Stay ahead of your limit") } footer: {
+            } header: { Text("Stay Ahead of Your Limit") } footer: {
                 Text("One alert per quota window at your chosen threshold. iOS manages background delivery, so alerts may be delayed.")
             }
             Section {
@@ -268,7 +271,7 @@ struct DashboardScreen: View {
                 Label("Lock Screen", systemImage: "lock.rectangle")
                 Text("Touch and hold your Lock Screen, tap Customize, then add a Costbar widget.")
                     .font(.subheadline).foregroundStyle(.secondary)
-            } header: { Text("Usage without opening the app") } footer: {
+            } header: { Text("Usage Without Opening the App") } footer: {
                 Text("Widgets show the latest synced costs and allowances, with their age.")
             }
             Section("Connection") {
@@ -284,15 +287,14 @@ struct DashboardScreen: View {
                 if let message = store.message { Text(message).font(.caption).foregroundStyle(.orange) }
             }
             Section {
-                Label("Credentials stay on your Mac", systemImage: "lock.shield")
+                Label("Provider keys are never shared with this app", systemImage: "lock.shield")
                     .font(.subheadline.weight(.medium))
-                Text("Only usage summaries are shared through your private iCloud account. Update provider tokens in Costbar on your Mac; the refreshed usage syncs here.")
+                Text("Only usage summaries reach this device, through your private iCloud database. Provider keys stay in iCloud Keychain for Costbar on your Macs; update them there and the refreshed usage syncs here.")
                     .font(.caption).foregroundStyle(.secondary)
-                Text("To disconnect, turn off iPhone sync on your Mac. This phone clears its saved snapshot on the next successful sync.")
+                Text("To disconnect, turn off iPhone sync on your Mac. This device clears its saved snapshot on the next successful sync.")
                     .font(.caption).foregroundStyle(.secondary)
             }
         }
-        .scrollContentBackground(.hidden).background(Palette.background)
         .navigationTitle("Settings")
         .task { await store.refreshNotificationStatus() }
     }
@@ -309,7 +311,7 @@ private struct SpendOverview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             HStack {
-                Text("MONTH TO DATE").font(.caption.weight(.semibold)).tracking(1.3).foregroundStyle(.secondary)
+                Text("Month to Date").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
                 Spacer()
                 Image(systemName: "chart.line.uptrend.xyaxis").foregroundStyle(Palette.blue)
             }
@@ -333,7 +335,7 @@ private struct SpendOverview: View {
         }
         .padding(22).frame(maxWidth: .infinity, alignment: .leading)
         .background(LinearGradient(colors: [Palette.blue.opacity(0.15), Palette.raised], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: Layout.cornerRadius, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Layout.cornerRadius, style: .continuous).strokeBorder(.white.opacity(0.08)))
+
     }
 }
 
@@ -445,6 +447,16 @@ private struct ProviderDetail: View {
     let providerID: String
     @ObservedObject var store: MobileStore
     @Environment(\.dismiss) private var dismiss
+
+    /// The system close button, drawn as a glass icon where iOS supports it.
+    @ViewBuilder private var closeButton: some View {
+        if #available(iOS 26, *) {
+            Button(role: .close) { dismiss() }
+        } else {
+            Button("Done") { dismiss() }
+        }
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -479,7 +491,7 @@ private struct ProviderDetail: View {
                 }
             }.background(Palette.background)
             .navigationTitle("Source details").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .confirmationAction) { closeButton } }
         }.tint(Palette.blue)
     }
 }
@@ -502,6 +514,35 @@ private extension View {
     func card(padding: CGFloat = 20) -> some View {
         self.frame(maxWidth: .infinity, alignment: .leading).padding(padding)
             .background(Palette.raised, in: RoundedRectangle(cornerRadius: Layout.cornerRadius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: Layout.cornerRadius, style: .continuous).strokeBorder(.white.opacity(0.06)))
+    }
+
+    /// The one primary call to action, on prominent glass where iOS draws it.
+    @ViewBuilder
+    func prominentGlassButton() -> some View {
+        if #available(iOS 26, *) {
+            buttonStyle(.glassProminent)
+        } else {
+            buttonStyle(.borderedProminent).buttonBorderShape(.roundedRectangle(radius: Layout.cornerRadius))
+        }
+    }
+
+    /// Lets content scroll under a tab bar that shrinks out of the way.
+    @ViewBuilder
+    func minimizingTabBarOnScroll() -> some View {
+        if #available(iOS 26, *) {
+            tabBarMinimizeBehavior(.onScrollDown)
+        } else {
+            self
+        }
+    }
+
+    /// Lets iPad show the tabs as a floating sidebar when there is room.
+    @ViewBuilder
+    func sidebarAdaptableTabs() -> some View {
+        if #available(iOS 18, *) {
+            tabViewStyle(.sidebarAdaptable)
+        } else {
+            self
+        }
     }
 }

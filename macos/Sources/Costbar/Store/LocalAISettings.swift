@@ -17,6 +17,7 @@ enum LocalAISettings {
         case .codex: "track-codex-local-usage-v1"
         case .claude: "track-claude-local-usage-v1"
         case .opencode: "track-opencode-local-usage-v1"
+        case .cursor: "track-cursor-local-usage-v1"
         }
     }
 }

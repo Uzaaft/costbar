@@ -1,22 +1,17 @@
 import Charts
 import SwiftUI
 
-/// The breakdown window paints its own dark chrome instead of following the
-/// system appearance, so its colors live here rather than in the asset catalog.
+/// The breakdown window's few named roles, all system colors so they follow
+/// the appearance, accent color, and Increase Contrast.
 enum WindowPalette {
-  static let background = Color(red: 0.072, green: 0.072, blue: 0.082)
-  static let sidebar = Color(red: 0.09, green: 0.092, blue: 0.102)
-  static let chrome = Color(red: 0.075, green: 0.076, blue: 0.086)
-  static let controlBackground = Color.white.opacity(0.055)
-  static let segmentSelected = Color.white.opacity(0.13)
-  static let selection = Color(red: 0.17, green: 0.24, blue: 0.27)
-  static let textPrimary = Color.white.opacity(0.94)
-  static let textSecondary = Color.white.opacity(0.62)
-  static let textTertiary = Color.white.opacity(0.34)
-  static let hairline = Color.white.opacity(0.075)
-  static let border = Color.white.opacity(0.12)
-  static let blue = Color(red: 0.25, green: 0.52, blue: 0.95)
-  static let warning = Color(red: 0.96, green: 0.61, blue: 0.22)
+  static let surface = Color(nsColor: .quaternarySystemFill)
+  static let tableHeader = Color(nsColor: .quaternarySystemFill)
+  static let textPrimary = Color.primary
+  static let textSecondary = Color.secondary
+  static let textTertiary = Color.secondary
+  static let hairline = Color(nsColor: .separatorColor)
+  static let blue = Color.accentColor
+  static let warning = Color.orange
 }
 
 enum TokenFormat {
@@ -45,17 +40,17 @@ struct CardHeader: View {
     HStack(alignment: .firstTextBaseline) {
       VStack(alignment: .leading, spacing: 4) {
         Text(title)
-          .font(.system(size: 15, weight: .semibold))
+          .font(.title3.weight(.semibold))
           .foregroundStyle(WindowPalette.textPrimary)
         Text(subtitle)
-          .font(.system(size: 11.5))
+          .font(.subheadline)
           .foregroundStyle(WindowPalette.textTertiary)
       }
 
       Spacer(minLength: 12)
 
       Text(trailing)
-        .font(.system(size: 13, weight: .medium, design: .monospaced))
+        .font(.body.weight(.medium).monospacedDigit())
         .foregroundStyle(WindowPalette.textSecondary)
     }
   }
@@ -71,7 +66,7 @@ struct ErrorStrip: View {
         .lineLimit(2)
       Spacer(minLength: 0)
     }
-    .font(.system(size: 12))
+    .font(.callout)
     .foregroundStyle(WindowPalette.warning)
     .padding(12)
     .background(WindowPalette.warning.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
@@ -84,7 +79,7 @@ extension View {
     padding(18)
       .background(
         RoundedRectangle(cornerRadius: 12, style: .continuous)
-          .fill(WindowPalette.sidebar.opacity(0.68))
+          .fill(WindowPalette.surface)
           .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
               .stroke(WindowPalette.hairline, lineWidth: 1)
@@ -117,7 +112,7 @@ extension View {
           if let date = value.as(Date.self) {
             AxisValueLabel {
               Text(xLabel(date))
-                .font(.system(size: 9.5))
+                .font(.footnote)
                 .foregroundStyle(WindowPalette.textTertiary)
             }
           }
@@ -130,14 +125,11 @@ extension View {
           if let amount = value.as(Double.self) {
             AxisValueLabel {
               Text(yLabel(amount))
-                .font(.system(size: 9.5, design: .monospaced))
+                .font(.footnote.monospacedDigit())
                 .foregroundStyle(WindowPalette.textTertiary)
             }
           }
         }
-      }
-      .chartPlotStyle { plotArea in
-        plotArea.background(WindowPalette.background.opacity(0.34))
       }
       .frame(height: 220)
   }

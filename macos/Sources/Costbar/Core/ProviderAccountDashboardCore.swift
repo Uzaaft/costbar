@@ -236,7 +236,8 @@ final class ProviderAccountDashboardCore {
                     codexAccountID: nil,
                     sourceIDs: selectedOtherLocalIDs,
                     writesCache: true,
-                    cacheKey: "local-v1"
+                    cacheKey: "local-v1",
+                    cursorSession: CursorEditorSession.cookieHeader()
                 ))
                 configuredCount += localResult.configuredCount
                 refreshedCount += localResult.refreshedCount

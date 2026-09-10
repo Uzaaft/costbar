@@ -13,17 +13,17 @@ struct BreakdownDataTable: View {
       HStack {
         VStack(alignment: .leading, spacing: 3) {
           Text(title)
-            .font(.system(size: 15, weight: .semibold))
+            .font(.title3.weight(.semibold))
             .foregroundStyle(WindowPalette.textPrimary)
           if let selectedProviderName {
             Text("Filtered to \(selectedProviderName)")
-              .font(.system(size: 11.5))
+              .font(.subheadline)
               .foregroundStyle(WindowPalette.textTertiary)
           }
         }
         Spacer()
         Text("\(rowCount) \(rowCount == 1 ? "row" : "rows")")
-          .font(.system(size: 11.5, design: .monospaced))
+          .font(.subheadline.monospacedDigit())
           .foregroundStyle(WindowPalette.textTertiary)
       }
 
@@ -41,10 +41,10 @@ struct BreakdownDataTable: View {
 
   private var title: String {
     switch section {
-    case .overview: "Largest charges"
-    case .providers: "Provider breakdown"
-    case .services: "Service breakdown"
-    case .resources: "Resource inventory"
+    case .overview: "Largest Charges"
+    case .providers: "Provider Breakdown"
+    case .services: "Service Breakdown"
+    case .resources: "Resource Inventory"
     }
   }
 
@@ -167,7 +167,7 @@ private enum SpendTableColumn: TableColumnDescribing, CaseIterable {
     case .service: "Service"
     case .account: "Account"
     case .resource: "Resource"
-    case .monthToDate: "MTD"
+    case .monthToDate: "Month to Date"
     case .share: "Share"
     }
   }
@@ -306,7 +306,7 @@ private enum ResourceTableColumn: TableColumnDescribing, CaseIterable {
     case .account: "Account"
     case .kind: "Type"
     case .status: "Status"
-    case .quantity: "Qty"
+    case .quantity: "Quantity"
     }
   }
 
@@ -363,16 +363,14 @@ private struct TableHeaderRow<Column: TableColumnDescribing>: View {
     HStack(spacing: 18) {
       ForEach(Array(columns.enumerated()), id: \.offset) { _, column in
         Text(column.title)
-          .font(.system(size: 10.5, weight: .semibold))
-          .tracking(0.9)
-          .textCase(.uppercase)
+          .font(.subheadline.weight(.semibold))
           .foregroundStyle(WindowPalette.textTertiary)
           .tableColumn(column)
       }
     }
     .padding(.horizontal, 16)
     .frame(height: 40)
-    .background(WindowPalette.chrome)
+    .background(WindowPalette.tableHeader)
   }
 }
 
@@ -383,7 +381,7 @@ private struct TableRow<Content: View>: View {
     HStack(spacing: 18) {
       content
     }
-    .font(.system(size: 12.5))
+    .font(.callout)
     .foregroundStyle(WindowPalette.textSecondary)
     .padding(.horizontal, 16)
     .frame(height: 46)
@@ -398,7 +396,7 @@ private struct TableEmptyState: View {
 
   var body: some View {
     Text(message)
-      .font(.system(size: 12.5))
+      .font(.callout)
       .foregroundStyle(WindowPalette.textTertiary)
       .frame(maxWidth: .infinity, minHeight: 92)
   }

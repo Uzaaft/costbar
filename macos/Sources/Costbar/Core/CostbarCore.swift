@@ -41,6 +41,7 @@ struct CoreRefreshRequest: Sendable {
     let sourceIDs: Set<String>?
     let writesCache: Bool
     let cacheKey: String?
+    var cursorSession: String? = nil
 
     func tracks(_ source: LocalSource) -> UInt8 {
         trackedLocalSources.contains(source) ? 1 : 0
@@ -161,6 +162,8 @@ final class CostbarCore: @unchecked Sendable {
         let settings = request.credentials.coreSettings + [
             ("codex.home", request.codexHome),
             ("codex.account-id", request.codexAccountID),
+            ("cursor-local.enabled", request.tracks(.cursor) == 1 ? "1" : "0"),
+            ("cursor-local.session", request.cursorSession),
         ]
         for (key, value) in settings {
             let keyData = Data(key.utf8)

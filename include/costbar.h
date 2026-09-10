@@ -203,6 +203,24 @@ costbar_status_t costbar_claude_status_bridge_is_installed(uint8_t *out_installe
 costbar_status_t costbar_claude_status_bridge_install(void);
 costbar_status_t costbar_claude_status_bridge_restore(void);
 
+typedef struct costbar_session_monitor costbar_session_monitor_t;
+
+costbar_session_monitor_t *costbar_session_monitor_create(void);
+void costbar_session_monitor_destroy(costbar_session_monitor_t *monitor);
+costbar_status_t costbar_session_monitor_set_roots(
+    costbar_session_monitor_t *monitor,
+    costbar_bytes_t roots
+);
+costbar_status_t costbar_session_monitor_poll(
+    costbar_session_monitor_t *monitor,
+    int64_t now_unix,
+    costbar_bytes_t *out_json
+);
+costbar_status_t costbar_session_monitor_transitions(
+    costbar_session_monitor_t *monitor,
+    costbar_bytes_t *out_json
+);
+
 costbar_core_t *costbar_core_create(void);
 void costbar_core_destroy(costbar_core_t *core);
 

@@ -15,6 +15,7 @@ enum ProviderLogoAsset {
     "cloudflare": Variants(light: "ProviderLogo-cloudflare", dark: nil),
     "codex": Variants(light: "ProviderLogo-codex", dark: "ProviderLogo-codex-dark"),
     "cursor": Variants(light: "ProviderLogo-cursor", dark: "ProviderLogo-cursor-dark"),
+    "cursor-local": Variants(light: "ProviderLogo-cursor", dark: "ProviderLogo-cursor-dark"),
     "digitalocean": Variants(light: "ProviderLogo-digitalocean", dark: nil),
     "github": Variants(light: "ProviderLogo-github", dark: "ProviderLogo-github-dark"),
     "openai-api": Variants(light: "ProviderLogo-openai", dark: "ProviderLogo-openai-dark"),
@@ -55,7 +56,7 @@ struct ProviderLogo: View {
 
   var body: some View {
     Group {
-      if let assetName = ProviderLogoAsset.name(for: providerID, colorScheme: colorScheme) {
+      if let assetName = assetName {
         if let monochrome {
           Image(assetName)
             .renderingMode(.template)
@@ -76,6 +77,15 @@ struct ProviderLogo: View {
     .frame(width: size, height: size)
     .accessibilityHidden(true)
   }
+
+  /// Silhouettes always use the light mark so the template mask is a positive
+  /// shape, independent of the surrounding color scheme.
+  private var assetName: String? {
+    if monochrome != nil {
+      return ProviderLogoAsset.variantsByProviderID[providerID]?.light
+    }
+    return ProviderLogoAsset.name(for: providerID, colorScheme: colorScheme)
+  }
 }
 
 enum ProviderTint {
@@ -85,15 +95,15 @@ enum ProviderTint {
     case "hetzner": Color(red: 0.88, green: 0.16, blue: 0.22)
     case "cloudflare": Color(red: 0.95, green: 0.49, blue: 0.20)
     case "runpod": Color(red: 0.40, green: 0.78, blue: 0.55)
-    case "vercel": Color(red: 0.91, green: 0.91, blue: 0.94)
+    // Monochrome brands take the label color so they read in both appearances.
+    case "vercel", "xai-api": Color.primary
     case "openrouter": Color(red: 0.51, green: 0.46, blue: 0.93)
     case "codex": Color(red: 0.23, green: 0.75, blue: 0.66)
     case "claude": Color(red: 0.82, green: 0.44, blue: 0.29)
     case "openai-api": Color(red: 0.22, green: 0.72, blue: 0.62)
     case "anthropic-api": Color(red: 0.78, green: 0.43, blue: 0.26)
-    case "xai-api": Color(red: 0.90, green: 0.90, blue: 0.92)
     case "github": Color(red: 0.65, green: 0.65, blue: 0.72)
-    case "cursor": Color(red: 0.55, green: 0.70, blue: 0.98)
+    case "cursor", "cursor-local": Color(red: 0.55, green: 0.70, blue: 0.98)
     case "opencode": Color(red: 0.96, green: 0.72, blue: 0.24)
     default: WindowPalette.blue
     }

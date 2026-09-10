@@ -55,34 +55,24 @@ struct BreakdownWindowView: View {
   @State private var selectedTokenWindowID = "month"
 
   var body: some View {
-    HStack(spacing: 0) {
-      BreakdownSidebar(
-        dashboard: store.dashboard,
-        section: $section,
-        selectedProviderID: $selectedProviderID
-      )
-      .frame(width: 232)
-
-      verticalHairline
-
-      VStack(spacing: 0) {
-        BreakdownCommandBar(
-          store: store,
-          grouping: $grouping,
-          usageWindows: selectedProvider?.tokenUsageWindows ?? [],
-          usesRollingSpendRanges: usesRollingSpendRanges,
-          showsSpendGrouping: selectedProvider?.tokenUsageSeries.isEmpty != false,
-          selectedTokenWindowID: $selectedTokenWindowID
-        )
-
-        horizontalHairline
-
-        content
-      }
+    NavigationSplitView {
+      BreakdownSidebar(dashboard: store.dashboard, selection: sidebarSelection)
+    } detail: {
+      content
+        .navigationTitle(selectedProvider?.summary.displayName ?? section.title)
+        .navigationSubtitle(subtitle)
+        .toolbar {
+          BreakdownToolbar(
+            store: store,
+            grouping: $grouping,
+            usageWindows: selectedProvider?.tokenUsageWindows ?? [],
+            usesRollingSpendRanges: usesRollingSpendRanges,
+            showsSpendGrouping: selectedProvider?.tokenUsageSeries.isEmpty != false,
+            selectedTokenWindowID: $selectedTokenWindowID
+          )
+        }
     }
-    .frame(minWidth: 1_020, idealWidth: 1_180, minHeight: 650, idealHeight: 760)
-    .background(WindowPalette.background)
-    .environment(\.colorScheme, .dark)
+    .frame(minWidth: 960, idealWidth: 1_180, minHeight: 620, idealHeight: 760)
     .onChange(of: selectedProviderID) { _, providerID in
       let report = store.dashboard?.providers.first { $0.id == providerID }
       selectedTokenWindowID = report?.summary.providerTypeID == Self.rollingSpendProviderID
@@ -249,15 +239,26 @@ struct BreakdownWindowView: View {
     }
   }
 
-  private var verticalHairline: some View {
-    Rectangle()
-      .fill(WindowPalette.hairline)
-      .frame(width: 1)
+  private var sidebarSelection: Binding<BreakdownSelection?> {
+    Binding(
+      get: { selectedProviderID.map(BreakdownSelection.provider) ?? .section(section) },
+      set: { selection in
+        switch selection {
+        case let .section(item):
+          section = item
+          selectedProviderID = nil
+        case let .provider(id):
+          selectedProviderID = id
+          section = .providers
+        case nil:
+          break
+        }
+      }
+    )
   }
 
-  private var horizontalHairline: some View {
-    Rectangle()
-      .fill(WindowPalette.hairline)
-      .frame(height: 1)
+  private var subtitle: String {
+    guard let updated = store.lastUpdatedAt else { return "" }
+    return "Updated " + updated.formatted(date: .omitted, time: .shortened)
   }
 }

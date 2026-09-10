@@ -1,3 +1,4 @@
+import Charts
 import SwiftUI
 
 /// Month-to-date spend split into its largest groups.
@@ -58,74 +59,48 @@ private struct SpendChartItem: Identifiable {
   let label: String
   let amountMicros: Int64
   let color: Color
+
+  var amount: Double { Double(amountMicros) / 1_000_000 }
 }
 
 private struct SpendBarChart: View {
-  /// Room under the bars for the value and the label.
-  private static let labelHeight: CGFloat = 49
-
   let items: [SpendChartItem]
   let currency: String
 
   var body: some View {
-    GeometryReader { geometry in
-      let availableHeight = max(80, geometry.size.height - Self.labelHeight)
-
-      ZStack(alignment: .bottom) {
-        chartGrid
-
-        HStack(alignment: .bottom, spacing: 12) {
-          ForEach(items) { item in
-            bar(item, height: barHeight(for: item, available: availableHeight))
-          }
-        }
-        .padding(.horizontal, 4)
+    Chart(items) { item in
+      BarMark(
+        x: .value("Group", item.label),
+        y: .value("Spend", item.amount)
+      )
+      .foregroundStyle(item.color.gradient)
+      .cornerRadius(4)
+      .annotation(position: .top, spacing: 6) {
+        Text(item.amountMicros.currencyText(code: currency))
+          .font(.footnote)
+          .monospacedDigit()
+          .foregroundStyle(.secondary)
+      }
+      .accessibilityLabel(item.label)
+      .accessibilityValue(item.amountMicros.currencyText(code: currency))
+    }
+    // Largest first, as sorted, rather than the axis's alphabetical default.
+    .chartXScale(domain: items.map(\.label))
+    .chartXAxis {
+      AxisMarks { _ in
+        AxisValueLabel()
+      }
+    }
+    .chartYAxis {
+      AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
+        AxisGridLine()
+        AxisValueLabel(
+          format: .currency(code: currency)
+            .precision(.fractionLength(0))
+            .locale(MoneyFormat.locale)
+        )
       }
     }
     .frame(height: 196)
-  }
-
-  private func bar(_ item: SpendChartItem, height: CGFloat) -> some View {
-    VStack(spacing: 7) {
-      Text(item.amountMicros.currencyText(code: currency))
-        .font(.system(size: 9.5, design: .monospaced))
-        .foregroundStyle(WindowPalette.textTertiary)
-        .lineLimit(1)
-        .minimumScaleFactor(0.65)
-
-      RoundedRectangle(cornerRadius: 4, style: .continuous)
-        .fill(
-          LinearGradient(
-            colors: [item.color.opacity(0.72), item.color],
-            startPoint: .bottom,
-            endPoint: .top
-          )
-        )
-        .frame(height: height)
-
-      Text(item.label)
-        .font(.system(size: 10.5))
-        .foregroundStyle(WindowPalette.textSecondary)
-        .lineLimit(1)
-        .truncationMode(.tail)
-    }
-    .frame(maxWidth: .infinity)
-  }
-
-  private var chartGrid: some View {
-    VStack {
-      Rectangle().fill(WindowPalette.hairline).frame(height: 1)
-      Spacer()
-      Rectangle().fill(WindowPalette.hairline).frame(height: 1)
-      Spacer()
-      Rectangle().fill(WindowPalette.hairline).frame(height: 1)
-    }
-    .padding(.bottom, 27)
-  }
-
-  private func barHeight(for item: SpendChartItem, available: CGFloat) -> CGFloat {
-    guard let maximum = items.map(\.amountMicros).max(), maximum > 0 else { return 4 }
-    let ratio = CGFloat(Double(item.amountMicros) / Double(maximum))
-    return max(5, ratio * available)
   }
 }

@@ -44,6 +44,9 @@ final class ProviderSettingsStore: ObservableObject {
         reload()
     }
 
+    /// Whether saved secrets travel to the user's other Macs through iCloud Keychain.
+    var credentialLocation: CredentialStore.Location { credentials.location }
+
     func save() -> Bool {
         do {
             commitSelectedAccount()

@@ -42,10 +42,21 @@ final class NotchSettingsStore: ObservableObject {
         didSet { defaults.set(Array(launchDisabled).sorted(), forKey: Self.launchDisabledKey) }
     }
 
+    @Published var announcesCompletion: Bool {
+        didSet { defaults.set(announcesCompletion, forKey: Self.announceKey) }
+    }
+
+    @Published var playsCompletionSound: Bool {
+        didSet { defaults.set(playsCompletionSound, forKey: Self.soundKey) }
+    }
+
     private let defaults: UserDefaults
     private static let enabledKey = "notch-enabled-v1"
     private static let edgeKey = "notch-edge-v1"
     private static let launchDisabledKey = "notch-launch-disabled-v1"
+    private static let announceKey = "notch-announce-completion-v1"
+    private static let soundKey = "notch-completion-sound-v1"
+    static let muteKey = "quota-alert-muted-providers-v1"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -56,6 +67,8 @@ final class NotchSettingsStore: ObservableObject {
             (defaults.stringArray(forKey: Self.launchDisabledKey) ?? [])
                 .filter(CodingAgent.providerTypeIDs.contains)
         )
+        announcesCompletion = defaults.object(forKey: Self.announceKey) as? Bool ?? true
+        playsCompletionSound = defaults.bool(forKey: Self.soundKey)
     }
 
     func opensApp(_ agent: CodingAgent) -> Bool {

@@ -4,8 +4,7 @@ import SwiftUI
 /// notch shows at all, and which edge it hangs from.
 struct NotchSettingsView: View {
   @ObservedObject var settings: NotchSettingsStore
-  /// Opens Costbar's own Settings, where Codex accounts are switched.
-  let openAccountSettings: () -> Void
+  @Environment(\.openSettings) private var openSettings
 
   static let size = CGSize(width: 380, height: 560)
 
@@ -17,11 +16,11 @@ struct NotchSettingsView: View {
             agentRow(agent)
           }
         } header: {
-          Text("Coding agents")
+          Text("Coding Agents")
         } footer: {
           Text(
             "Claude and Codex quota come from the sign-in each tool already holds on this Mac. "
-              + "Cursor uses the admin key added in Costbar's settings. "
+              + "Cursor personal allowance uses the editor session; team billing still uses the admin key. "
               + "Costbar reads the numbers and keeps no copy."
           )
         }
@@ -29,6 +28,9 @@ struct NotchSettingsView: View {
         Section("Notch") {
           Toggle("Side notch", isOn: $settings.isEnabled)
           SettingsHelpText("Slides out when the pointer reaches the edge and tucks away when you leave.")
+          Toggle("Peek when an agent finishes or waits", isOn: $settings.announcesCompletion)
+          Toggle("Play a sound with that peek", isOn: $settings.playsCompletionSound)
+            .disabled(!settings.announcesCompletion)
 
           Picker("Edge", selection: $settings.edge) {
             ForEach(NotchEdge.allCases) { edge in
@@ -72,7 +74,11 @@ struct NotchSettingsView: View {
         .font(.caption)
         .foregroundStyle(.secondary)
       if agent == .codex {
-        Button("Switch account…", action: openAccountSettings)
+        // Costbar's own Settings, where Codex accounts are switched.
+        Button("Switch Account…") {
+          NSApp.activate()
+          openSettings()
+        }
           .buttonStyle(.link)
           .font(.caption)
       }

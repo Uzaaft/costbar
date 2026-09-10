@@ -27,12 +27,33 @@ protocol DashboardCredentials: AnyObject {
 
 extension CredentialStore: DashboardCredentials {}
 
+/// Where the dashboard on screen came from, and so how far to trust it.
+enum DashboardDataSource: Sendable {
+    case notConfigured
+    /// Read from the last run's cache; nothing fetched yet.
+    case cached
+    case live
+    /// Some or all providers failed, so older figures are still showing.
+    case stale
+    case unavailable
+
+    var label: String {
+        switch self {
+        case .notConfigured: "Not configured"
+        case .cached: "Cached"
+        case .live: "Live"
+        case .stale: "Out of date"
+        case .unavailable: "Unavailable"
+        }
+    }
+}
+
 @MainActor
 final class DashboardStore: ObservableObject {
     @Published private(set) var dashboard: Dashboard?
     @Published private(set) var errorMessage: String?
     @Published private(set) var isRefreshing = false
-    @Published private(set) var dataSourceLabel = "not configured"
+    @Published private(set) var dataSource = DashboardDataSource.notConfigured
     @Published private(set) var lastUpdatedAt: Date?
 
     private var core: (any DashboardCore)?
@@ -42,17 +63,20 @@ final class DashboardStore: ObservableObject {
     private var pollingTask: Task<Void, Never>?
     private var refreshRequested = false
     private let publishSnapshot: (Dashboard) -> Void
+    var activityBusy: () -> Bool
 
     init(
         credentials: any DashboardCredentials = CredentialStore(),
         pollingSchedule: @escaping () -> PollingSchedule = { PollingSettings.schedule() },
         automaticallyRefreshes: Bool = true,
         publishSnapshot: @escaping (Dashboard) -> Void = { MobileSyncStore.shared.publish($0) },
+        activityBusy: @escaping () -> Bool = { false },
         coreFactory: () throws -> any DashboardCore = { try ProviderAccountDashboardCore() }
     ) {
         self.credentials = credentials
         self.pollingSchedule = pollingSchedule
         self.publishSnapshot = publishSnapshot
+        self.activityBusy = activityBusy
         do {
             let core = try coreFactory()
             self.core = core
@@ -66,7 +90,7 @@ final class DashboardStore: ObservableObject {
             }
             if let cached = try core.cachedSnapshot(period: period, accountData: savedAccountData) {
                 dashboard = cached
-                dataSourceLabel = "cached"
+                dataSource = .cached
                 lastUpdatedAt = Date(timeIntervalSince1970: TimeInterval(cached.generatedAtUnix))
             }
             if automaticallyRefreshes {
@@ -77,11 +101,6 @@ final class DashboardStore: ObservableObject {
             core = nil
             errorMessage = error.localizedDescription
         }
-    }
-
-    var menuBarTitle: String {
-        guard let total = dashboard?.primaryTotal else { return "Costbar" }
-        return total.currentCostMicros.currencyText(code: total.currency)
     }
 
     func refresh() {
@@ -165,15 +184,15 @@ final class DashboardStore: ObservableObject {
         }
 
         if preservedCachedCosts {
-            dataSourceLabel = "stale"
+            dataSource = .stale
         } else if !completedRefresh {
-            dataSourceLabel = hadDashboard ? "stale" : "unavailable"
+            dataSource = hadDashboard ? .stale : .unavailable
         } else if configuredProviderCount == 0 {
-            if isFullRefresh { dataSourceLabel = "not configured" }
+            if isFullRefresh { dataSource = .notConfigured }
         } else if refreshedProviderCount == configuredProviderCount {
-            dataSourceLabel = "live"
+            dataSource = .live
         } else {
-            dataSourceLabel = "stale"
+            dataSource = .stale
         }
         errorMessage = errors.isEmpty ? nil : errors.joined(separator: "\n")
     }
@@ -191,7 +210,7 @@ final class DashboardStore: ObservableObject {
 
     private func startPolling() {
         pollingTask?.cancel()
-        let schedule = pollingSchedule()
+        let schedule = pollingSchedule().clampedForBusyLocalSources(activityBusy())
         pollingTask = Task { [weak self] in
             await RefreshPolling.run(schedule: schedule) { [weak self] sourceIDs in
                 await self?.poll(sourceIDs: sourceIDs)

@@ -11,6 +11,7 @@ struct ProviderSettingsView: View {
   @ObservedObject var settings: ProviderSettingsStore
   @ObservedObject var dashboard: DashboardStore
   @ObservedObject var notch: NotchSettingsStore
+  @ObservedObject var menuBar: MenuBarSettingsStore
   @State private var selection: SettingsDestination?
   @State private var searchText = ""
 
@@ -41,7 +42,7 @@ struct ProviderSettingsView: View {
   private var detail: some View {
     switch selection ?? .general {
     case .general:
-      GeneralSettingsDetail(settings: settings, dashboard: dashboard, notch: notch)
+      GeneralSettingsDetail(settings: settings, dashboard: dashboard, notch: notch, menuBar: menuBar)
     case let .provider(provider):
       ProviderAccountSettingsDetail(
         provider: provider,

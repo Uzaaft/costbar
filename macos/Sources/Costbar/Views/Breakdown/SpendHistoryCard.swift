@@ -61,7 +61,7 @@ struct SpendHistoryCard: View {
               .fill(modelColors[index])
               .frame(width: 7, height: 7)
             Text(model)
-              .font(.system(size: 10.5))
+              .font(.footnote)
               .foregroundStyle(WindowPalette.textTertiary)
               .lineLimit(1)
           }

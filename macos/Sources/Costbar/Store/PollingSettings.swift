@@ -17,6 +17,17 @@ struct PollingSource: Identifiable, Sendable {
 struct PollingSchedule: Sendable {
     let intervals: [String: Duration]
 
+    func clampedForBusyLocalSources(_ busy: Bool) -> PollingSchedule {
+        guard busy else { return self }
+        var intervals = intervals
+        for source in LocalSource.allCases {
+            if let current = intervals[source.sourceID], current > .seconds(60) {
+                intervals[source.sourceID] = .seconds(60)
+            }
+        }
+        return .init(intervals: intervals)
+    }
+
     static func uniform(_ interval: Duration) -> PollingSchedule {
         .init(intervals: Dictionary(
             uniqueKeysWithValues: PollingSource.all.map { ($0.id, interval) }

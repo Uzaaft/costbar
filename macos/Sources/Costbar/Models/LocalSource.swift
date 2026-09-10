@@ -9,6 +9,7 @@ enum LocalSource: String, CaseIterable, Identifiable, Sendable {
     case codex
     case claude
     case opencode
+    case cursor = "cursor-local"
 
     var id: String { rawValue }
 
@@ -20,6 +21,7 @@ enum LocalSource: String, CaseIterable, Identifiable, Sendable {
         case .codex: "Codex"
         case .claude: "Claude"
         case .opencode: "OpenCode"
+        case .cursor: "Cursor"
         }
     }
 
@@ -32,6 +34,8 @@ enum LocalSource: String, CaseIterable, Identifiable, Sendable {
             "Counts Claude Code tokens locally. Subscription quota comes from Claude's status-line rate-limit feed."
         case .opencode:
             "Queries exact cost and token metadata from the installed OpenCode CLI. Prompt and response content is never read."
+        case .cursor:
+            "Reads the signed-in Cursor editor session for personal Auto/API allowance. Team Admin billing stays a separate dollar provider."
         }
     }
 

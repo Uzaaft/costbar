@@ -68,6 +68,7 @@ struct SettingsSidebarRow: View {
         Circle()
           .fill(Color.green)
           .frame(width: 6, height: 6)
+          .accessibilityLabel("Configured")
       }
     }
     .contentShape(Rectangle())
@@ -139,7 +140,7 @@ struct SettingsSaveBar: View {
           .lineLimit(2)
       }
       Spacer()
-      Button("Save and refresh") {
+      Button("Save and Refresh") {
         if settings.save() {
           dashboard.pollingSettingsDidChange()
           dashboard.refresh()
@@ -149,8 +150,6 @@ struct SettingsSaveBar: View {
     }
     .padding(.horizontal, 22)
     .padding(.vertical, 12)
-    .background(.bar)
-    .overlay(alignment: .top) { Divider() }
   }
 }
 
@@ -171,8 +170,9 @@ struct SettingsDetailScaffold<Content: View>: View {
         content
       }
       .formStyle(.grouped)
-
-      SettingsSaveBar(settings: settings, dashboard: dashboard)
+      .bottomBar {
+        SettingsSaveBar(settings: settings, dashboard: dashboard)
+      }
     }
   }
 }

@@ -10,6 +10,8 @@ enum NotchPalette {
   static let textTertiary = Color.white.opacity(0.45)
   static let hairline = Color.white.opacity(0.12)
   static let border = Color.white.opacity(0.1)
+  /// An agent is blocked on the user, or an allowance will not last.
+  static let waiting = Color(red: 1, green: 0.72, blue: 0.18)
 }
 
 /// Green while there is plenty left, yellow past half, red when it is about to
@@ -25,6 +27,7 @@ enum QuotaTone {
 struct QuotaRing: View {
   let percent: Double
   var lineWidth: CGFloat = 4.5
+  var activity: AgentActivitySummaryState?
 
   var body: some View {
     let fraction = min(max(percent, 0), 100) / 100
@@ -38,7 +41,46 @@ struct QuotaRing: View {
           style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
         )
         .rotationEffect(.degrees(-90))
+      if activity == .working || activity == .waiting {
+        ActivityIndicatorRing(isWaiting: activity == .waiting)
+          .padding(lineWidth + 1.5)
+          // A fresh view per state, so one state's repeating animation
+          // never bleeds into the other.
+          .id(activity)
+          .transition(.opacity)
+      }
     }
+    .animation(.easeOut(duration: 0.2), value: activity)
+  }
+}
+
+/// The inner ring that says an agent is doing something: a white arc circling
+/// while it works, a full amber ring breathing while it waits on the user.
+/// With Reduce Motion both hold still and the color alone carries the state.
+private struct ActivityIndicatorRing: View {
+  let isWaiting: Bool
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var isAnimating = false
+
+  var body: some View {
+    Circle()
+      .trim(from: 0, to: isWaiting ? 1 : 0.22)
+      .stroke(
+        isWaiting ? NotchPalette.waiting : Color.white,
+        style: StrokeStyle(lineWidth: 1.6, lineCap: .round)
+      )
+      .rotationEffect(.degrees(!isWaiting && isAnimating ? 360 : 0))
+      .opacity(isWaiting && isAnimating ? 0.35 : 1)
+      .onAppear {
+        guard !reduceMotion else { return }
+        withAnimation(
+          isWaiting
+            ? .easeInOut(duration: 0.9).repeatForever(autoreverses: true)
+            : .linear(duration: 1.05).repeatForever(autoreverses: false)
+        ) {
+          isAnimating = true
+        }
+      }
   }
 }
 
@@ -130,6 +172,7 @@ final class NotchRailModel: ObservableObject {
   static func ringKey(_ reportID: String) -> String { "ring:" + reportID }
 
   @Published var reports: [Dashboard.ProviderReport] = []
+  @Published var activity: [String: AgentActivitySummaryState] = [:]
   @Published var edge: NotchEdge = .right
   @Published var stage: NotchStage = .tucked
   var isRevealed: Bool { stage == .revealed }
@@ -221,11 +264,14 @@ struct AgentNotchRail: View {
   }
 
   private func item(_ report: Dashboard.ProviderReport) -> some View {
-    let window = report.allowanceWindows.first
+    let window = report.headlineWindow
     let shown = model.ringsFilled ? (window?.usedPercent ?? 0) : 0
     return VStack(spacing: 9) {
       ZStack {
-        QuotaRing(percent: shown)
+        QuotaRing(
+          percent: shown,
+          activity: model.activity[report.summary.providerTypeID]
+        )
           .animation(.easeOut(duration: 0.36), value: shown)
         ProviderLogo(providerID: report.summary.providerTypeID, size: 20, monochrome: .white)
       }

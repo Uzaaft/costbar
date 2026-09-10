@@ -128,13 +128,54 @@ private struct HoverCardModifier<Card: View>: ViewModifier {
             .onChange(of: isPresented) { _, presented in
                 guard presented else { return presenter.dismiss() }
                 guard let rect = anchor.screenRect, let window = anchor.window else { return }
-                presenter.present(card(), anchor: rect, in: window)
+                presenter.present(
+                    // The presenter owns the surface, so a card is plain
+                    // content wherever else it is shown.
+                    card().panelSurface(in: RoundedRectangle(cornerRadius: 16, style: .continuous)),
+                    anchor: rect,
+                    in: window
+                )
             }
             .onDisappear { presenter.dismiss() }
     }
 }
 
+/// Opens the card once the pointer has rested on the view, and closes it the
+/// moment the pointer leaves.
+private struct HoverCardOnRest<Card: View>: ViewModifier {
+    let delay: Duration
+    @ViewBuilder let card: () -> Card
+
+    @State private var isHovering = false
+    @State private var showsCard = false
+
+    func body(content: Content) -> some View {
+        content
+            .onHover { hovering in
+                isHovering = hovering
+                if !hovering { showsCard = false }
+            }
+            .task(id: isHovering) {
+                guard isHovering else { return }
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return }
+                showsCard = true
+            }
+            .hoverCard(isPresented: showsCard, card: card)
+    }
+}
+
 extension View {
+    /// Floats `card` beside the window once the pointer rests here. The default
+    /// delay is long enough that skimming a list does not flash cards, short
+    /// enough that pausing on a row feels like it answered on its own.
+    func hoverCard(
+        after delay: Duration = .milliseconds(300),
+        @ViewBuilder card: @escaping () -> some View
+    ) -> some View {
+        modifier(HoverCardOnRest(delay: delay, card: card))
+    }
+
     /// Floats `card` beside the window this view lives in while `isPresented`.
     /// The card is a snapshot taken when it opens, so anything in it that has
     /// to keep ticking needs its own `TimelineView`.

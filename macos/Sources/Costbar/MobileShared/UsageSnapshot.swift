@@ -43,7 +43,7 @@ struct UsageSnapshot: Codable, Sendable {
 
         var showsAllowances: Bool {
             let sourceID = id.split(separator: "/").first
-            return sourceID == "codex" || sourceID == "claude" || !quotas.isEmpty
+            return sourceID == "codex" || sourceID == "claude" || sourceID == "cursor-local" || !quotas.isEmpty
         }
 
         func highestActiveQuota(at now: Date) -> Quota? {

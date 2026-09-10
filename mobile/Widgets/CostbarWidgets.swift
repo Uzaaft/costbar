@@ -34,9 +34,6 @@ struct UsageTimeline: TimelineProvider {
 struct UsageWidgetView: View {
     let entry: UsageEntry
     @Environment(\.widgetFamily) private var family
-    @Environment(\.colorScheme) private var colorScheme
-
-    private var isHomeScreen: Bool { family == .systemSmall || family == .systemMedium }
 
     private func quotaTitle(_ quota: UsageSnapshot.Quota) -> String {
         let parts = quota.label.components(separatedBy: " · ")
@@ -96,6 +93,7 @@ struct UsageWidgetView: View {
                         }
                         Text(snapshot.totals.first?.formatted ?? "Usage")
                             .font(.system(.title, design: .rounded, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.6)
+                            .widgetAccentable()
                         if let quota = highestQuota {
                             VStack(alignment: .leading, spacing: 3) {
                                 HStack {
@@ -129,8 +127,9 @@ struct UsageWidgetView: View {
                 }
             }
         }
-        .environment(\.colorScheme, isHomeScreen ? .dark : colorScheme)
-        .containerBackground(for: .widget) { Color(red: 0.106, green: 0.106, blue: 0.118) }
+        // The system background follows Light/Dark Mode and is removed for the
+        // tinted and clear (Liquid Glass) Home Screen styles.
+        .containerBackground(.background, for: .widget)
         .widgetURL(URL(string: "costbar://usage"))
     }
 }

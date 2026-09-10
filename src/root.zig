@@ -9,6 +9,9 @@ pub const local_usage = @import("local_usage.zig");
 pub const dashboard_cache = @import("dashboard_cache.zig");
 pub const live_refresh = @import("live_refresh.zig");
 pub const claude_status = @import("claude_status.zig");
+pub const sessions = @import("sessions.zig");
+pub const session_api = @import("session_api.zig");
+pub const claude_usage_cli = @import("claude_usage_cli.zig");
 pub const providers = struct {
     pub const digitalocean = @import("providers/digitalocean.zig");
     pub const hetzner = @import("providers/hetzner.zig");
@@ -23,12 +26,14 @@ pub const providers = struct {
     pub const xai_api = @import("providers/xai_api.zig");
     pub const github = @import("providers/github.zig");
     pub const cursor = @import("providers/cursor.zig");
+    pub const cursor_local = @import("providers/cursor_local.zig");
     pub const opencode = @import("providers/opencode.zig");
 };
 pub const c_api = @import("c_api.zig");
 
 comptime {
     _ = c_api;
+    _ = session_api;
 }
 
 test {
@@ -43,6 +48,9 @@ test {
     _ = dashboard_cache;
     _ = live_refresh;
     _ = claude_status;
+    _ = sessions;
+    _ = session_api;
+    _ = claude_usage_cli;
     _ = providers.digitalocean;
     _ = providers.hetzner;
     _ = providers.cloudflare;
@@ -56,6 +64,7 @@ test {
     _ = providers.xai_api;
     _ = providers.github;
     _ = providers.cursor;
+    _ = providers.cursor_local;
     _ = providers.opencode;
     _ = c_api;
 }

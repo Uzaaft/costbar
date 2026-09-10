@@ -9,7 +9,7 @@ func typedSnapshotBridgeHasNoProviderDataBeforeRefresh() throws {
     #expect(dashboard.providers.map(\.summary.id) == [
         "digitalocean", "hetzner", "cloudflare", "runpod", "vercel",
         "openrouter", "codex", "claude", "openai-api", "anthropic-api", "xai-api",
-        "github", "cursor", "opencode",
+        "github", "cursor", "cursor-local", "opencode",
     ])
     #expect(dashboard.providers.allSatisfy { $0.summary.status == .notConfigured })
     #expect(dashboard.providers.allSatisfy { $0.summary.errorMessage == nil })

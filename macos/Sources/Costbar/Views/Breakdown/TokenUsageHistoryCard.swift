@@ -47,7 +47,7 @@ struct TokenUsageHistoryCard: View {
             .fill(category.color)
             .frame(width: 7, height: 7)
           Text(category.title)
-            .font(.system(size: 10.5))
+            .font(.footnote)
             .foregroundStyle(WindowPalette.textTertiary)
         }
       }

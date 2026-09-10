@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const model = @import("model.zig");
+const http = @import("http.zig");
 const Provider = @import("provider.zig").Provider;
 const Registry = @import("registry.zig").Registry;
 const digitalocean = @import("providers/digitalocean.zig");
@@ -16,12 +17,18 @@ const anthropic_api = @import("providers/anthropic_api.zig");
 const xai_api = @import("providers/xai_api.zig");
 const github = @import("providers/github.zig");
 const cursor = @import("providers/cursor.zig");
+const cursor_local = @import("providers/cursor_local.zig");
 const opencode = @import("providers/opencode.zig");
 const allowance_pace = @import("allowance_pace.zig");
 const local_usage = @import("local_usage.zig");
 const dashboard_cache = @import("dashboard_cache.zig");
 const live_refresh = @import("live_refresh.zig");
 const claude_status = @import("claude_status.zig");
+const claude_usage_cli = @import("claude_usage_cli.zig");
+
+comptime {
+    _ = @import("session_api.zig");
+}
 
 const allocator = std.heap.c_allocator;
 
@@ -233,6 +240,7 @@ const Core = struct {
     xai_api_provider: xai_api.XAIAPI,
     github_provider: github.GitHub,
     cursor_provider: cursor.Cursor,
+    cursor_local_provider: cursor_local.CursorLocal,
     opencode_provider: opencode.OpenCode,
     codex_usage: local_usage.Collector(local_usage.CodexLogAdapter),
     claude_usage: local_usage.Collector(local_usage.ClaudeLogAdapter),
@@ -256,6 +264,7 @@ const Core = struct {
         core.xai_api_provider = .init();
         core.github_provider = .init();
         core.cursor_provider = .init();
+        core.cursor_local_provider = .init();
         core.opencode_provider = .init();
         core.codex_usage = .init(allocator);
         core.claude_usage = .init(allocator);
@@ -276,6 +285,7 @@ const Core = struct {
         try core.registry.addConfigured(Provider.from(&core.xai_api_provider), false);
         try core.registry.addConfigured(Provider.from(&core.github_provider), false);
         try core.registry.addConfigured(Provider.from(&core.cursor_provider), false);
+        try core.registry.addConfigured(Provider.from(&core.cursor_local_provider), false);
         try core.registry.addConfigured(Provider.from(&core.opencode_provider), false);
         return core;
     }
@@ -295,6 +305,7 @@ const Core = struct {
         core.xai_api_provider.deinit();
         core.github_provider.deinit();
         core.cursor_provider.deinit();
+        core.cursor_local_provider.deinit();
         core.opencode_provider.deinit();
         core.codex_usage.deinit();
         core.claude_usage.deinit();
@@ -414,6 +425,9 @@ export fn costbar_core_refresh(
         return .internal_error;
     core_value.registry.setConfigured("opencode", options.track_opencode != 0) catch
         return .internal_error;
+    const track_cursor_local = cursorLocalEnabled(core_value.settings);
+    core_value.registry.setConfigured("cursor-local", track_cursor_local) catch
+        return .internal_error;
     const home_pointer = std.c.getenv("HOME");
     const home = if (home_pointer) |pointer| std.mem.span(pointer) else "";
     const now = currentUnixTimestamp();
@@ -478,6 +492,18 @@ export fn costbar_core_refresh(
             .home = home,
             .now = now,
             .kind = .opencode,
+        };
+        context_count += 1;
+    }
+    if (track_cursor_local and sourceIsSelected(source_filter, "cursor-local")) {
+        contexts[context_count] = .{
+            .core = core_value,
+            .standard_client = &standard_client,
+            .credentials = credentials,
+            .period = period,
+            .home = home,
+            .now = now,
+            .kind = .cursor_local,
         };
         context_count += 1;
     }
@@ -1065,9 +1091,10 @@ const WorkKind = union(enum) {
     codex,
     claude,
     opencode,
+    cursor_local,
 };
 
-const max_worker_count = std.meta.fields(live_refresh.Kind).len + 3;
+const max_worker_count = std.meta.fields(live_refresh.Kind).len + 4;
 
 const WorkerContext = struct {
     core: *Core,
@@ -1097,6 +1124,7 @@ const WorkerContext = struct {
             .codex => "Codex",
             .claude => "Claude",
             .opencode => "OpenCode",
+            .cursor_local => "Cursor",
         };
     }
 };
@@ -1227,7 +1255,17 @@ fn runWorker(context: *WorkerContext) !void {
                 context.standard_client.io,
                 context.home,
             );
-            if (!aggregate.has_tokens and status_limits == null) return error.NoLocalUsage;
+            const cli_limits = if (status_limits == null)
+                try claude_usage_cli.fetchLimits(
+                    allocator,
+                    context.standard_client.io,
+                    context.home,
+                    context.now,
+                )
+            else
+                null;
+            const quota_limits = status_limits orelse cli_limits;
+            if (!aggregate.has_tokens and quota_limits == null) return error.NoLocalUsage;
             var usage_windows: [local_usage_window_definitions.len]claude.Claude.UsageWindow = undefined;
             const windows = try collectUsageWindows(
                 claude.Claude,
@@ -1248,12 +1286,47 @@ fn runWorker(context: *WorkerContext) !void {
             try updateClaude(
                 &context.core.claude_provider,
                 aggregate,
-                status_limits,
+                quota_limits,
                 windows,
                 series,
                 context.period,
                 context.now,
             );
+        },
+        .cursor_local => {
+            const cookie = context.core.settings.get("cursor-local.session") orelse
+                return error.CursorSessionMissing;
+            const trimmed = std.mem.trim(u8, cookie, " \t\r\n");
+            if (trimmed.len == 0) return error.CursorSessionMissing;
+            var backend = http.StdBackend{ .client = context.standard_client };
+            var client = http.Client(http.StdBackend).init(&backend);
+            const payload = try cursor_local.fetchUsageSummary(allocator, &client, trimmed);
+            defer allocator.free(payload);
+            const windows = try cursor_local.parseUsageSummary(allocator, payload);
+            defer {
+                for (windows) |window| {
+                    allocator.free(window.id);
+                    allocator.free(window.label);
+                }
+                allocator.free(windows);
+            }
+            var allowances = try allocator.alloc(cursor_local.CursorLocal.Allowance, windows.len);
+            defer allocator.free(allowances);
+            for (windows, 0..) |window, index| {
+                allowances[index] = .{
+                    .id = window.id,
+                    .label = window.label,
+                    .used_percent = window.used_percent,
+                    .resets_at_unix = window.resets_at_unix,
+                    .duration_minutes = window.duration_minutes,
+                };
+            }
+            try context.core.cursor_local_provider.update(allocator, .{
+                .period = context.period,
+                .allowance_windows = allowances,
+                .source = "Cursor editor session",
+                .updated_at_unix = context.now,
+            });
         },
         .opencode => {
             if (context.home.len == 0) return error.HomeUnavailable;
@@ -1353,6 +1426,11 @@ fn validSourceFilter(filter: ?[]const u8) bool {
     return true;
 }
 
+fn cursorLocalEnabled(settings: std.BufMap) bool {
+    const value = settings.get("cursor-local.enabled") orelse return false;
+    return std.mem.eql(u8, std.mem.trim(u8, value, " \t\r\n"), "1");
+}
+
 fn validCacheKey(key: []const u8) bool {
     if (key.len == 0 or key.len > 128) return false;
     for (key) |character| {
@@ -1369,7 +1447,8 @@ fn isKnownProviderId(provider_id: []const u8) bool {
     }
     return std.mem.eql(u8, provider_id, "codex") or
         std.mem.eql(u8, provider_id, "claude") or
-        std.mem.eql(u8, provider_id, "opencode");
+        std.mem.eql(u8, provider_id, "opencode") or
+        std.mem.eql(u8, provider_id, "cursor-local");
 }
 
 fn isKnownSetting(key: []const u8) bool {
@@ -1390,6 +1469,8 @@ fn isKnownSetting(key: []const u8) bool {
         "github.token",
         "github.organization",
         "cursor.admin-key",
+        "cursor-local.enabled",
+        "cursor-local.session",
         "codex.home",
         "codex.account-id",
     }) |known| {
@@ -1697,7 +1778,7 @@ fn updateClaude(
         if (limits.primary) |window| {
             allowances_buffer[allowance_count] = localAllowance(
                 claude.Claude,
-                "primary",
+                "session",
                 window,
                 &labels[allowance_count],
             );
@@ -1706,7 +1787,7 @@ fn updateClaude(
         if (limits.secondary) |window| {
             allowances_buffer[allowance_count] = localAllowance(
                 claude.Claude,
-                "secondary",
+                "weekly_all",
                 window,
                 &labels[allowance_count],
             );
@@ -1817,7 +1898,7 @@ test "C API has no fabricated provider data before the first refresh" {
     defer parsed.deinit();
 
     const root = parsed.value.object;
-    try std.testing.expectEqual(@as(usize, 14), root.get("providers").?.array.items.len);
+    try std.testing.expectEqual(@as(usize, 15), root.get("providers").?.array.items.len);
     try std.testing.expectEqual(@as(usize, 0), root.get("totals").?.array.items.len);
     const providers = root.get("providers").?.array.items;
     try std.testing.expectEqualStrings(

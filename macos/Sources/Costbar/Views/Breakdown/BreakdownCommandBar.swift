@@ -1,6 +1,10 @@
 import SwiftUI
 
-struct BreakdownCommandBar: View {
+/// The breakdown window's controls, placed in the system toolbar so they sit on
+/// its glass and follow its layout, overflow, and customization rules. The text
+/// menu and the icon button are separate groups: items that share a glass
+/// background should not mix text and icons.
+struct BreakdownToolbar: ToolbarContent {
   @ObservedObject var store: DashboardStore
   @Binding var grouping: SpendGrouping
   let usageWindows: [Dashboard.TokenUsageWindow]
@@ -8,79 +12,60 @@ struct BreakdownCommandBar: View {
   let showsSpendGrouping: Bool
   @Binding var selectedTokenWindowID: String
 
-  var body: some View {
-    HStack(spacing: 14) {
-      PeriodSelector(
-        windows: usageWindows,
-        usesRollingSpendRanges: usesRollingSpendRanges,
-        selection: $selectedTokenWindowID
-      )
-
-      Spacer(minLength: 20)
-
-      if showsSpendGrouping {
-        Menu {
-          Picker("Group spend", selection: $grouping) {
-            ForEach(SpendGrouping.allCases) { option in
-              Text(option.title).tag(option)
-            }
-          }
-        } label: {
-          CommandBarSurface {
-            Text("Group: \(grouping.title)")
-            Image(systemName: "chevron.down")
-              .font(.system(size: 9, weight: .semibold))
-          }
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
+  var body: some ToolbarContent {
+    if PeriodSelector.hasChoices(windows: usageWindows, usesRollingSpendRanges: usesRollingSpendRanges) {
+      ToolbarItem(placement: .principal) {
+        PeriodSelector(
+          windows: usageWindows,
+          usesRollingSpendRanges: usesRollingSpendRanges,
+          selection: $selectedTokenWindowID
+        )
       }
+    }
 
+    ToolbarItem(placement: .primaryAction) {
+      Picker("Group By", selection: $grouping) {
+        ForEach(SpendGrouping.allCases) { option in
+          Text(option.title).tag(option)
+        }
+      }
+      .pickerStyle(.menu)
+      .help("Group spend by service, provider, or resource")
+    }
+    .hiddenWhere(!showsSpendGrouping)
+
+    if #available(macOS 26, *) {
+      ToolbarSpacer(.fixed, placement: .primaryAction)
+    }
+
+    ToolbarItem(placement: .primaryAction) {
       Button {
         store.refresh()
       } label: {
-        CommandBarSurface {
-          if store.isRefreshing {
-            ProgressView()
-              .controlSize(.mini)
-          } else {
-            Image(systemName: "arrow.clockwise")
-          }
-          Text(refreshTitle)
+        if store.isRefreshing {
+          ProgressView()
+            .controlSize(.small)
+            .accessibilityLabel("Refreshing")
+        } else {
+          Label("Refresh", systemImage: "arrow.clockwise")
         }
       }
-      .buttonStyle(.plain)
       .disabled(store.isRefreshing)
       .keyboardShortcut("r", modifiers: .command)
+      .help("Refresh all sources (⌘R)")
     }
-    .padding(.horizontal, 30)
-    .frame(height: 72)
-    .background(WindowPalette.chrome)
-  }
-
-  /// The last refresh time doubles as the button label once data has loaded.
-  private var refreshTitle: String {
-    guard let updated = store.lastUpdatedAt else { return "Refresh" }
-    return updated.formatted(date: .omitted, time: .shortened)
   }
 }
 
-/// The outlined pill shared by the command bar's controls.
-private struct CommandBarSurface<Content: View>: View {
-  @ViewBuilder let content: Content
-
-  var body: some View {
-    HStack(spacing: 8) {
-      content
+private extension ToolbarContent {
+  /// Hides the whole item rather than its view, so no empty glass slot remains.
+  @ToolbarContentBuilder
+  func hiddenWhere(_ isHidden: Bool) -> some ToolbarContent {
+    if #available(macOS 26, *) {
+      hidden(isHidden)
+    } else if !isHidden {
+      self
     }
-    .font(.system(size: 12.5, weight: .medium))
-    .foregroundStyle(WindowPalette.textSecondary)
-    .padding(.horizontal, 13)
-    .frame(height: 34)
-    .background(
-      RoundedRectangle(cornerRadius: 9, style: .continuous)
-        .stroke(WindowPalette.border, lineWidth: 1)
-    )
   }
 }
 
@@ -93,52 +78,32 @@ private struct PeriodSelector: View {
     (id: "thirty-days", title: "1 month"),
   ]
 
+  /// A one-segment control is not a choice, so the toolbar omits it.
+  static func hasChoices(windows: [Dashboard.TokenUsageWindow], usesRollingSpendRanges: Bool) -> Bool {
+    usesRollingSpendRanges || !windows.isEmpty
+  }
+
   let windows: [Dashboard.TokenUsageWindow]
   let usesRollingSpendRanges: Bool
   @Binding var selection: String
 
   var body: some View {
-    HStack(spacing: 2) {
+    Picker("Period", selection: $selection) {
       if usesRollingSpendRanges {
         ForEach(Self.rollingSpendRanges, id: \.id) { range in
-          periodButton(id: range.id, title: range.title)
+          Text(range.title).tag(range.id)
         }
       } else {
-        periodButton(id: "month", title: "Month")
+        Text("Month").tag("month")
         ForEach(windows) { window in
-          periodButton(id: window.id, title: shortLabel(for: window))
+          Text(shortLabel(for: window)).tag(window.id)
         }
       }
     }
-    .padding(3)
-    .background(
-      RoundedRectangle(cornerRadius: 9, style: .continuous)
-        .fill(WindowPalette.controlBackground)
-    )
-    .help(helpText)
-  }
-
-  private var helpText: String {
-    if usesRollingSpendRanges { return "Choose an OpenRouter activity range" }
-    return windows.isEmpty ? "Monthly data" : "Choose a rolling local-usage window"
-  }
-
-  private func periodButton(id: String, title: String) -> some View {
-    let isSelected = selection == id
-    return Button {
-      selection = id
-    } label: {
-      Text(title)
-        .font(.system(size: 13, weight: isSelected ? .semibold : .regular))
-        .foregroundStyle(isSelected ? WindowPalette.textPrimary : WindowPalette.textSecondary)
-        .padding(.horizontal, 13)
-        .frame(height: 30)
-        .background(
-          RoundedRectangle(cornerRadius: 7, style: .continuous)
-            .fill(isSelected ? WindowPalette.segmentSelected : .clear)
-        )
-    }
-    .buttonStyle(.plain)
+    .pickerStyle(.segmented)
+    .labelsHidden()
+    .fixedSize()
+    .help(usesRollingSpendRanges ? "Choose an OpenRouter activity range" : "Choose a rolling local-usage window")
   }
 
   private func shortLabel(for window: Dashboard.TokenUsageWindow) -> String {

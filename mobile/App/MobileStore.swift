@@ -60,14 +60,14 @@ final class MobileStore: ObservableObject {
         do {
             alertsEnabled = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
             await refreshNotificationStatus()
-            notificationFeedback = alertsEnabled ? "Alerts are ready. Choose the usage level you want to hear about." : "Notifications are disabled in iPhone Settings."
+            notificationFeedback = alertsEnabled ? "Alerts are ready. Choose the usage level you want to hear about." : "Notifications are disabled in the Settings app."
         } catch { notificationFeedback = error.localizedDescription }
     }
 
     func sendTestNotification() async {
         await refreshNotificationStatus()
         guard notificationsAllowed else {
-            notificationFeedback = "Allow notifications in iPhone Settings first."
+            notificationFeedback = "Allow notifications in the Settings app first."
             return
         }
         let content = UNMutableNotificationContent()
@@ -126,7 +126,7 @@ final class MobileStore: ObservableObject {
         guard let cloudError = error as? CKError else { return error.localizedDescription }
         switch cloudError.code {
         case .notAuthenticated:
-            return "Sign in to your Apple Account in iPhone Settings, using the same account as your Mac."
+            return "Sign in to your Apple Account in the Settings app, using the same account as your Mac."
         case .networkUnavailable, .networkFailure:
             return "Could not reach iCloud. Check your connection and pull to refresh."
         case .serviceUnavailable, .requestRateLimited:

@@ -32,6 +32,7 @@ final class AgentNotchController {
   }
 
   private let store: DashboardStore
+  private let sessions: SessionStore
   private let settings: NotchSettingsStore
   private let model = NotchRailModel()
   private let cards = NotchCardPresenter()
@@ -50,9 +51,12 @@ final class AgentNotchController {
   private var hoveredID: String?
   private var presentedID: String?
   private var settingsWindow: NSWindow?
+  private var holdOpenTask: Task<Void, Never>?
+  private var lastTransitionIDs: Set<String> = []
 
-  init(store: DashboardStore, settings: NotchSettingsStore) {
+  init(store: DashboardStore, sessions: SessionStore, settings: NotchSettingsStore) {
     self.store = store
+    self.sessions = sessions
     self.settings = settings
     model.edge = settings.edge
     // Windows and event monitors want a launched application; the App is
@@ -75,6 +79,25 @@ final class AgentNotchController {
         self?.settingsDidChange()
       }
       .store(in: &cancellables)
+    sessions.$snapshot
+      .receive(on: RunLoop.main)
+      .sink { [weak self] snapshot in
+        self?.apply(sessions: snapshot)
+      }
+      .store(in: &cancellables)
+    sessions.$transitions
+      .receive(on: RunLoop.main)
+      .sink { [weak self] transitions in
+        self?.announce(transitions)
+      }
+      .store(in: &cancellables)
+    sessions.$anyBusy
+      .removeDuplicates()
+      .receive(on: RunLoop.main)
+      .sink { [weak self] _ in
+        self?.store.pollingSettingsDidChange()
+      }
+      .store(in: &cancellables)
     startMonitoring()
   }
 
@@ -83,6 +106,17 @@ final class AgentNotchController {
   private func apply(reports: [Dashboard.ProviderReport]) {
     model.reports = reports
     refreshPresence()
+  }
+
+  private func apply(sessions snapshot: AgentSessionSnapshot?) {
+    var activity: [String: AgentActivitySummaryState] = [:]
+    for provider in snapshot?.providers ?? [] {
+      activity[provider.providerId] = provider.summary
+    }
+    model.activity = activity
+    if let presentedID {
+      presentCard(for: presentedID)
+    }
   }
 
   private func settingsDidChange() {
@@ -377,7 +411,11 @@ final class AgentNotchController {
       height: ring.height
     )
     cards.present(
-      AgentQuotaCard(report: report, pointer: model.edge),
+      AgentQuotaCard(
+        report: report,
+        sessions: sessions.activity(for: report.summary.providerTypeID)?.sessions ?? [],
+        pointer: model.edge
+      ),
       anchor: anchor,
       edge: model.edge,
       screen: screen,
@@ -400,11 +438,44 @@ final class AgentNotchController {
       showSettings()
       return
     }
+    if let session = announcedSession(at: local) {
+      focus(pid: session.pid)
+      return
+    }
     guard let report = model.reports.first(where: { model.frames[$0.id]?.contains(local) == true }),
           let agent = CodingAgent(providerTypeID: report.summary.providerTypeID),
           settings.opensApp(agent)
     else { return }
     AgentLauncher.open(agent)
+  }
+
+  private func announcedSession(at local: CGPoint) -> AgentSession? {
+    guard let report = model.reports.first(where: { model.frames[$0.id]?.contains(local) == true })
+    else { return nil }
+    return sessions.activity(for: report.summary.providerTypeID)?.sessions.first { $0.pid != nil }
+  }
+
+  private func announce(_ transitions: [AgentSessionTransition]) {
+    let fresh = transitions.filter { !lastTransitionIDs.contains($0.id + $0.kind.rawValue) }
+    lastTransitionIDs = Set(transitions.map { $0.id + $0.kind.rawValue })
+    guard !fresh.isEmpty, settings.announcesCompletion, isEnabled else { return }
+    cancelTuck()
+    reveal()
+    if settings.playsCompletionSound {
+      NSSound(named: "Tink")?.play()
+    }
+    holdOpenTask?.cancel()
+    holdOpenTask = Task { [weak self] in
+      try? await Task.sleep(for: .seconds(5))
+      guard !Task.isCancelled, let self else { return }
+      self.holdOpenTask = nil
+      self.evaluate()
+    }
+  }
+
+  private func focus(pid: Int32?) {
+    guard let pid else { return }
+    NSRunningApplication(processIdentifier: pid)?.activate()
   }
 
   // MARK: - Settings window
@@ -430,18 +501,10 @@ final class AgentNotchController {
     window.isReleasedWhenClosed = false
     window.appearance = NSAppearance(named: .darkAqua)
     window.contentView = NSHostingView(
-      rootView: NotchSettingsView(settings: settings) {
-        Self.openAppSettings()
-      }
+      rootView: NotchSettingsView(settings: settings)
     )
     settingsWindow = window
     return window
-  }
-
-  /// The app's own Settings scene, where Codex accounts are switched.
-  static func openAppSettings() {
-    NSApp.activate()
-    NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
   }
 }
 
@@ -454,6 +517,9 @@ final class NotchCardPresenter {
   private var panel: NSPanel?
   private var hosting: NSHostingView<AnyView>?
   private var isShowing = false
+  /// Bumped on every fresh presentation so the reveal replays; a card that
+  /// only moves to another ring keeps its identity and glides instead.
+  private var presentation = 0
   private var hideTask: Task<Void, Never>?
 
   var frame: NSRect? {
@@ -469,7 +535,8 @@ final class NotchCardPresenter {
   ) {
     hideTask?.cancel()
     hideTask = nil
-    let root = AnyView(NotchCardReveal(edge: edge, animates: !isShowing) { card })
+    if !isShowing { presentation += 1 }
+    let root = AnyView(NotchCardReveal(edge: edge) { card }.id(presentation))
     let hosting = hosting ?? NSHostingView(rootView: root)
     hosting.rootView = root
     self.hosting = hosting
@@ -553,23 +620,15 @@ final class NotchCardPresenter {
 /// another ring keeps the same view identity, so it moves rather than replays.
 private struct NotchCardReveal<Content: View>: View {
   let edge: NotchEdge
-  let animates: Bool
   @ViewBuilder let content: () -> Content
-  @State private var shown: Bool
-
-  init(edge: NotchEdge, animates: Bool, @ViewBuilder content: @escaping () -> Content) {
-    self.edge = edge
-    self.animates = animates
-    self.content = content
-    _shown = State(initialValue: !animates)
-  }
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @State private var shown = false
 
   var body: some View {
     content()
       .opacity(shown ? 1 : 0)
-      .offset(shown ? .zero : slide)
+      .offset(shown || reduceMotion ? .zero : slide)
       .onAppear {
-        guard !shown else { return }
         withAnimation(.easeOut(duration: 0.2)) {
           shown = true
         }

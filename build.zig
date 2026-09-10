@@ -52,7 +52,30 @@ pub fn build(b: *std.Build) !void {
     const run_policy_tests = b.addRunArtifact(policy_tests);
     b.step("test-usage", "Run portable usage policy and C ABI tests").dependOn(&run_policy_tests.step);
     test_step.dependOn(&run_policy_tests.step);
+    const session_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/sessions.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    const run_session_tests = b.addRunArtifact(session_tests);
+    b.step("test-session", "Run portable session activity tests").dependOn(&run_session_tests.step);
+    test_step.dependOn(&run_session_tests.step);
     const usage_step = b.step("usage-kit", "Build the shared macOS and iOS usage policy XCFramework");
+
+    const emit_cli = b.option(bool, "emit-cli", "Build the costbar CLI.") orelse false;
+    if (emit_cli) {
+        const cli = b.addExecutable(.{
+            .name = "costbar",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/cli.zig"),
+                .target = target,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        b.installArtifact(cli);
+    }
 
     const run_step = b.step("run", "Run the native macOS app");
 

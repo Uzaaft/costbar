@@ -19,8 +19,19 @@ enum CredentialStoreError: Error, LocalizedError {
 
 /// A macOS Keychain adapter only. Each setting is an independent UTF-8 item;
 /// provider serialization and interpretation stay in Zig.
+///
+/// Signed builds that carry a keychain access group keep every item in the
+/// data protection keychain, marked synchronizable, so iCloud Keychain carries
+/// them end-to-end encrypted to the user's other Macs. Builds without that
+/// entitlement (ad-hoc release, the test host) cannot reach that keychain and
+/// keep using the login keychain on this Mac.
 @MainActor
 final class CredentialStore {
+    enum Location: Equatable {
+        case iCloudKeychain
+        case thisMac
+    }
+
     private struct LegacyStoredAccount: Codable {
         let id: String
         let type: ProviderAccountType
@@ -42,7 +53,7 @@ final class CredentialStore {
 
     private struct StoredAccountFile: Codable {
         let version: Int
-        let providers: [String: StoredProviderAccountData]
+        var providers: [String: StoredProviderAccountData]
     }
 
     private struct StoredAccountReference {
@@ -56,11 +67,27 @@ final class CredentialStore {
     private let accountIndex = "accounts.v3"
     private let accountPrefix = "account.v2."
     private let deletionMarkerSuffix = ".deleted"
+    private let probeAccount = "sync-probe"
+    private let prefersICloudKeychain: Bool
+    private var resolvedLocation: Location?
     private var cached: ProviderCredentials?
     private var cachedAccountData: [ProviderAccountData]?
 
-    init(service: String = "com.costbar.provider-credentials") {
+    init(
+        service: String = "com.costbar.provider-credentials",
+        prefersICloudKeychain: Bool = true
+    ) {
         self.service = service
+        self.prefersICloudKeychain = prefersICloudKeychain
+    }
+
+    /// Where items are read and written. Resolved once, on first use, after
+    /// moving anything still in the login keychain into iCloud Keychain.
+    var location: Location {
+        if let resolvedLocation { return resolvedLocation }
+        let location = resolveLocation()
+        resolvedLocation = location
+        return location
     }
 
     func load() throws -> ProviderCredentials {
@@ -274,7 +301,11 @@ final class CredentialStore {
     }
 
     private func loadData(account: String) throws -> Data? {
-        var query = matchQuery(account: account)
+        try loadData(account: account, in: location)
+    }
+
+    private func loadData(account: String, in location: Location) throws -> Data? {
+        var query = matchQuery(account: account, in: location)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -346,7 +377,11 @@ final class CredentialStore {
     }
 
     private func upsert(_ data: Data, account: String) throws {
-        let query = matchQuery(account: account)
+        try upsert(data, account: account, in: location)
+    }
+
+    private func upsert(_ data: Data, account: String, in location: Location) throws {
+        let query = matchQuery(account: account, in: location)
         let status = SecItemUpdate(
             query as CFDictionary,
             [kSecValueData as String: data] as CFDictionary
@@ -356,7 +391,10 @@ final class CredentialStore {
             throw CredentialStoreError.unexpectedStatus(status)
         }
         var insertion = query
+        // Synchronizable items cannot be device-bound. After first unlock keeps
+        // background polling working while the screen is locked.
         insertion[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        insertion[kSecAttrLabel as String] = "Costbar provider credential"
         insertion[kSecValueData as String] = data
         let addStatus = SecItemAdd(insertion as CFDictionary, nil)
         guard addStatus == errSecSuccess else {
@@ -365,17 +403,129 @@ final class CredentialStore {
     }
 
     private func remove(account: String) throws {
-        let status = SecItemDelete(matchQuery(account: account) as CFDictionary)
+        try remove(account: account, in: location)
+    }
+
+    private func remove(account: String, in location: Location) throws {
+        let status = SecItemDelete(matchQuery(account: account, in: location) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw CredentialStoreError.unexpectedStatus(status)
         }
     }
 
     private func matchQuery(account: String) -> [String: Any] {
-        [
+        matchQuery(account: account, in: location)
+    }
+
+    private func matchQuery(account: String, in location: Location) -> [String: Any] {
+        var query = serviceQuery(in: location)
+        query[kSecAttrAccount as String] = account
+        return query
+    }
+
+    private func serviceQuery(in location: Location) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
         ]
+        if location == .iCloudKeychain {
+            query[kSecUseDataProtectionKeychain as String] = true
+            query[kSecAttrSynchronizable as String] = true
+        }
+        return query
+    }
+
+    // MARK: - iCloud Keychain
+
+    private func resolveLocation() -> Location {
+        guard prefersICloudKeychain, canUseDataProtectionKeychain() else { return .thisMac }
+        do {
+            try migrateLocalItems()
+            return .iCloudKeychain
+        } catch {
+            // Keep reading the untouched local copy rather than an iCloud
+            // Keychain that is missing part of it.
+            return .thisMac
+        }
+    }
+
+    /// The data protection keychain needs an application identifier that only
+    /// a provisioned signature carries. Adding a device-only item is the one
+    /// reliable test; it never leaves this Mac and is removed straight away.
+    private func canUseDataProtectionKeychain() -> Bool {
+        let probe: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: probeAccount,
+            kSecUseDataProtectionKeychain as String: true,
+            kSecAttrSynchronizable as String: false,
+        ]
+        SecItemDelete(probe as CFDictionary)
+        var insertion = probe
+        insertion[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        insertion[kSecValueData as String] = Data()
+        guard SecItemAdd(insertion as CFDictionary, nil) == errSecSuccess else { return false }
+        SecItemDelete(probe as CFDictionary)
+        return true
+    }
+
+    /// Copies every login-keychain item into iCloud Keychain, then deletes the
+    /// local originals. Items another Mac already synced win, except the account
+    /// index, which is merged so neither Mac's accounts disappear. Nothing local
+    /// is removed until every copy has succeeded.
+    private func migrateLocalItems() throws {
+        let accounts = try localAccounts()
+        guard !accounts.isEmpty else { return }
+        for account in accounts {
+            guard let local = try loadData(account: account, in: .thisMac) else { continue }
+            let synced = try loadData(account: account, in: .iCloudKeychain)
+            if account == accountIndex, let synced {
+                try upsert(try mergedAccountIndex(synced, local), account: account, in: .iCloudKeychain)
+            } else if synced == nil {
+                try upsert(local, account: account, in: .iCloudKeychain)
+            }
+        }
+        for account in accounts {
+            try remove(account: account, in: .thisMac)
+        }
+    }
+
+    private func localAccounts() throws -> [String] {
+        var query = serviceQuery(in: .thisMac)
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw CredentialStoreError.unexpectedStatus(status) }
+        let items = result as? [[String: Any]] ?? []
+        return items.compactMap { $0[kSecAttrAccount as String] as? String }
+            .filter { $0 != probeAccount }
+    }
+
+    private func mergedAccountIndex(_ synced: Data, _ local: Data) throws -> Data {
+        do {
+            let decoder = JSONDecoder()
+            var merged = try decoder.decode(StoredAccountFile.self, from: synced)
+            let incoming = try decoder.decode(StoredAccountFile.self, from: local)
+            guard merged.version == 1, incoming.version == 1 else {
+                throw CredentialStoreError.invalidData
+            }
+            for (type, provider) in incoming.providers {
+                guard let existing = merged.providers[type] else {
+                    merged.providers[type] = provider
+                    continue
+                }
+                let known = Set(existing.accounts.map(\.id))
+                merged.providers[type] = StoredProviderAccountData(
+                    version: existing.version,
+                    accounts: existing.accounts + provider.accounts.filter { !known.contains($0.id) },
+                    activeIndex: existing.activeIndex
+                )
+            }
+            return try JSONEncoder().encode(merged)
+        } catch {
+            throw CredentialStoreError.invalidData
+        }
     }
 }

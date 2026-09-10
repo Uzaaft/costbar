@@ -25,7 +25,7 @@ func dashboardStorePublishesTheZigCacheBeforeRefreshing() throws {
     )
 
     #expect(store.dashboard?.generatedAtUnix == 123)
-    #expect(store.dataSourceLabel == "cached")
+    #expect(store.dataSource == .cached)
     #expect(store.lastUpdatedAt == Date(timeIntervalSince1970: 123))
 }
 
@@ -44,7 +44,7 @@ func dashboardStorePreservesCachedDataWhenBackgroundRefreshFails() async throws 
 
     try await Task.sleep(for: .milliseconds(30))
     #expect(store.dashboard?.generatedAtUnix == 123)
-    #expect(store.dataSourceLabel == "stale")
+    #expect(store.dataSource == .stale)
     #expect(store.lastUpdatedAt == Date(timeIntervalSince1970: 123))
 }
 
@@ -71,7 +71,7 @@ func dashboardStoreDoesNotReplaceCachedCostsWithTokenOnlyRefresh() async throws 
         try await Task.sleep(for: .milliseconds(10))
     }
     #expect(store.dashboard?.generatedAtUnix == 123)
-    #expect(store.dataSourceLabel == "stale")
+    #expect(store.dataSource == .stale)
     #expect(store.lastUpdatedAt == Date(timeIntervalSince1970: 123))
     #expect(store.errorMessage?.contains("showing the last cached overview") == true)
 }
@@ -123,6 +123,16 @@ func pollingSettingsPersistDefaultAndSparseOverrides() throws {
     #expect(schedule.intervals["codex"] == .seconds(60))
     #expect(schedule.intervals["hetzner"] == .seconds(3_600))
     #expect(schedule.intervals["digitalocean"] == .seconds(900))
+}
+
+@Test
+func busyLocalSourcesClampToOneMinute() {
+    let schedule = PollingSchedule.uniform(.seconds(300)).clampedForBusyLocalSources(true)
+    #expect(schedule.intervals["codex"] == .seconds(60))
+    #expect(schedule.intervals["claude"] == .seconds(60))
+    #expect(schedule.intervals["cursor-local"] == .seconds(60))
+    #expect(schedule.intervals["digitalocean"] == .seconds(300))
+    #expect(PollingSchedule.uniform(.seconds(300)).clampedForBusyLocalSources(false).intervals["codex"] == .seconds(300))
 }
 
 @MainActor
